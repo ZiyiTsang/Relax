@@ -243,6 +243,25 @@ class TestRewardWorkerDirect:
             ray.get(self.worker.compute.remote("nonexistent_type", "foo", "bar"))
 
 
+def _kill_executor_workers():
+    """Kill named Ray actors held by the current RewardExecutor singleton.
+
+    Without this, dropping ``RewardExecutor._instance`` only releases the
+    Python actor handles; on Python 3.10 the next test can reach
+    ``options(get_if_exists=True)`` before Ray finishes evicting the named
+    actors, get a handle to a dying actor, and hit ActorDiedError.
+    """
+    inst = RewardExecutor._instance
+    if inst is None:
+        return
+    for w in inst._workers:
+        try:
+            ray.kill(w)
+        except Exception:
+            pass
+    inst._workers = []
+
+
 @requires_full_pipeline
 class TestRewardExecutorSingleSample:
     """Test RewardExecutor.execute() with single samples (the async_rm
@@ -251,8 +270,10 @@ class TestRewardExecutorSingleSample:
     @pytest.fixture(autouse=True)
     def _reset_executor(self):
         """Reset the singleton so each test gets a clean executor."""
+        _kill_executor_workers()
         RewardExecutor._instance = None
         yield
+        _kill_executor_workers()
         RewardExecutor._instance = None
 
     @pytest.mark.asyncio
@@ -302,12 +323,13 @@ class TestBatchedAsyncRM:
 
     @pytest.fixture(autouse=True)
     def _reset_executor(self):
+        _kill_executor_workers()
         RewardExecutor._instance = None
         yield
+        _kill_executor_workers()
         RewardExecutor._instance = None
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(sys.version_info < (3, 11), reason="requires Python 3.11+")
     async def test_batch_all_correct(self):
         args = _make_args()
         samples = [_make_sample(response=f"\\boxed{{{i}}}", label=str(i)) for i in range(10)]
@@ -353,8 +375,10 @@ class TestHighConcurrency:
 
     @pytest.fixture(autouse=True)
     def _reset_executor(self):
+        _kill_executor_workers()
         RewardExecutor._instance = None
         yield
+        _kill_executor_workers()
         RewardExecutor._instance = None
 
     @pytest.mark.asyncio
