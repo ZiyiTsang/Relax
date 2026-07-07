@@ -87,7 +87,6 @@ def main(args):
         runtime_env = yaml.safe_load(file)
 
     runtime_env = post_process_env(args, runtime_env)
-    init_tracking(args)
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(runtime_env=runtime_env)
@@ -99,6 +98,11 @@ def main(args):
             )
         except RuntimeError:
             pass
+
+    # init_tracking must run after serve.start() (metrics adapter probes Ray
+    # Serve for the /metrics endpoint) and before Controller() (wandb primary
+    # writes wandb_run_id into args, which then propagates to remote actors).
+    init_tracking(args)
 
     ctrl = Controller(args, runtime_env)
     _ctrl = ctrl
