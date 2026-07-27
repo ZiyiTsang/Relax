@@ -3,7 +3,14 @@ from collections.abc import Callable
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from megatron.core import mpu
+
+
+try:
+    from megatron.core import mpu
+except ModuleNotFoundError as exc:
+    if exc.name not in {"megatron", "megatron.core"}:
+        raise
+    mpu = None
 
 
 def maybe_padded_total_lengths(
