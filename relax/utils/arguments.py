@@ -1525,6 +1525,22 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="from Dr.GRPO https://arxiv.org/pdf/2503.20783",
             )
             parser.add_argument(
+                "--pg-loss-aggregation",
+                type=str,
+                choices=["seq-mean-token-mean", "seq-mean-token-sum-norm"],
+                default="seq-mean-token-mean",
+                help="Policy-gradient loss aggregation mode.",
+            )
+            parser.add_argument(
+                "--pg-loss-scale-factor",
+                type=float,
+                default=None,
+                help=(
+                    "Fixed token-sum normalizer for --pg-loss-aggregation seq-mean-token-sum-norm. "
+                    "Defaults to --rollout-max-response-len."
+                ),
+            )
+            parser.add_argument(
                 "--disable-rewards-normalization",
                 action="store_false",
                 dest="rewards_normalization",
@@ -2443,6 +2459,26 @@ def _validate_agentic_rollout_args(args) -> None:
         raise ValueError("--agentic-eval-prepare-pool-size must be > 0.")
 
 
+def _validate_pg_loss_aggregation(args: Any) -> None:
+    pg_loss_aggregation = getattr(args, "pg_loss_aggregation", "seq-mean-token-mean")
+    if pg_loss_aggregation != "seq-mean-token-sum-norm":
+        return
+    if args.advantage_estimator != "grpo":
+        raise ValueError("--pg-loss-aggregation seq-mean-token-sum-norm requires --advantage-estimator grpo.")
+    if args.pg_loss_scale_factor is None:
+        args.pg_loss_scale_factor = getattr(args, "rollout_max_response_len", None)
+    if args.pg_loss_scale_factor is None or args.pg_loss_scale_factor <= 0:
+        raise ValueError(
+            "--pg-loss-aggregation seq-mean-token-sum-norm requires a positive --pg-loss-scale-factor "
+            "or --rollout-max-response-len."
+        )
+    if args.calculate_per_token_loss and getattr(args, "fully_async", False):
+        raise ValueError(
+            "--pg-loss-aggregation seq-mean-token-sum-norm with --calculate-per-token-loss does not support "
+            "--fully-async because its streaming iterator has no step-global token normalizer."
+        )
+
+
 def slime_validate_args(args):
     # Backward compatibility: old scripts may pass --enable-gloo-process-groups
     if not hasattr(args, "use_gloo_process_groups"):
@@ -2480,6 +2516,8 @@ def slime_validate_args(args):
 
     if args.max_staleness < 0:
         raise ValueError("--max-staleness must be >= 0.")
+
+    _validate_pg_loss_aggregation(args)
 
     # Refuse SGLANG_ENABLE_SPEC_V2=1 with speculative decoding. Spec_v2 routes
     # requests through EAGLEWorkerV2.verify(), which (in our pinned SGLang

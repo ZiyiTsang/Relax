@@ -28,6 +28,7 @@ from relax.utils.training.flops_counter import FlopsCounter
 from relax.utils.types import RolloutBatch
 
 from .cp_utils import (
+    expand_step_loss_normalizers,
     dynamic_cp_split_data,
     get_sum_of_sample_mean,
     maybe_padded_total_lengths,
@@ -646,6 +647,7 @@ class DataIterator:
         micro_batch_size: int | None = None,
         micro_batch_indices: list[list[int]] | None = None,
         max_tokens_per_gpu: int | None = None,
+        per_microbatch_loss_normalizers: list[torch.Tensor | None] | None = None,
     ) -> None:
         """Initialize an iterator over `rollout_data`.
 
@@ -663,8 +665,10 @@ class DataIterator:
         self.micro_batch_size = micro_batch_size
         self.micro_batch_indices = micro_batch_indices
         self.max_tokens_per_gpu = max_tokens_per_gpu
+        self.per_microbatch_loss_normalizers = per_microbatch_loss_normalizers
         assert micro_batch_size is None or micro_batch_indices is None
         self.offset = 0
+        self.microbatch_offset = 0
 
     def get_next(self, keys: Sequence[str]) -> dict[str, list[object] | None]:
         """Return the next micro-batch for the requested keys.
@@ -676,6 +680,7 @@ class DataIterator:
 
         Returns a dict mapping each key to a list subset (or None if absent).
         """
+        microbatch_index = self.microbatch_offset
         batch = {}
         for key in keys:
             vals = self.rollout_data.get(key, None)
@@ -695,11 +700,15 @@ class DataIterator:
             self.offset += 1
         else:
             self.offset += self.micro_batch_size
+        self.microbatch_offset += 1
+        if self.per_microbatch_loss_normalizers is not None:
+            batch["__per_token_loss_normalizer__"] = self.per_microbatch_loss_normalizers[microbatch_index]
         return batch
 
     def reset(self) -> "DataIterator":
         """Reset internal offset to the start and return self."""
         self.offset = 0
+        self.microbatch_offset = 0
         return self
 
 
@@ -790,10 +799,24 @@ def get_data_iterator(
             f"num_local_samples={num_local_samples}, num_steps_per_rollout={num_steps_per_rollout}"
         )
 
-    def _generate_data_iterator(rollout_data, micro_batch_size, micro_batch_indices=None, max_tokens_per_gpu=None):
+    def _generate_data_iterator(
+        rollout_data,
+        micro_batch_size,
+        micro_batch_indices=None,
+        max_tokens_per_gpu=None,
+        per_microbatch_loss_normalizers=None,
+    ):
         data_iterator = []
         for _ in range(vpp_size):
-            data_iterator.append(DataIterator(rollout_data, micro_batch_size, micro_batch_indices, max_tokens_per_gpu))
+            data_iterator.append(
+                DataIterator(
+                    rollout_data,
+                    micro_batch_size,
+                    micro_batch_indices,
+                    max_tokens_per_gpu,
+                    per_microbatch_loss_normalizers,
+                )
+            )
         return data_iterator
 
     if step_local_sample_counts is None:
@@ -863,6 +886,29 @@ def get_data_iterator(
             f"After dynamic batching, num_microbatches: {num_microbatches}, micro_batch_indices: {micro_batch_indices}"
         )
         data_iterator = _generate_data_iterator(rollout_data, None, micro_batch_indices, _max_tokens)
+
+    if (
+        args.calculate_per_token_loss
+        and getattr(args, "pg_loss_aggregation", "seq-mean-token-mean") == "seq-mean-token-sum-norm"
+    ):
+        step_offsets = np.cumsum([0, *step_local_sample_counts]).tolist()
+        local_normalizers = torch.stack(
+            [
+                sum(loss_mask.sum() for loss_mask in rollout_data["loss_masks"][step_offsets[i] : step_offsets[i + 1]])
+                for i in range(num_steps_per_rollout)
+            ]
+        ).to(
+            device=device_utils.make_current_torch_device(), dtype=torch.float
+        )
+        dist.all_reduce(local_normalizers, op=dist.ReduceOp.SUM, group=dp_group)
+        per_microbatch_loss_normalizers = expand_step_loss_normalizers(local_normalizers.unbind(), num_microbatches)
+        data_iterator = _generate_data_iterator(
+            rollout_data,
+            args.micro_batch_size if not args.use_dynamic_batch_size else None,
+            micro_batch_indices if args.use_dynamic_batch_size else None,
+            _max_tokens if args.use_dynamic_batch_size else None,
+            per_microbatch_loss_normalizers,
+        )
 
     return (
         data_iterator,
