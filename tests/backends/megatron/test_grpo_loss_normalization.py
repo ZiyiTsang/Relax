@@ -5,6 +5,60 @@ from types import ModuleType
 import pytest
 
 
+def _run_static_cp_dr_grpo_worker(rank: int, init_method: str, result_path: str) -> None:
+    import torch
+    import torch.distributed as dist
+
+    megatron = ModuleType("megatron")
+    core = ModuleType("megatron.core")
+    mpu = ModuleType("megatron.core.mpu")
+    mpu.get_context_parallel_rank = lambda: rank
+    mpu.get_context_parallel_world_size = lambda: 2
+    core.mpu = mpu
+    megatron.core = core
+    sys.modules["megatron"] = megatron
+    sys.modules["megatron.core"] = core
+    sys.modules["megatron.core.mpu"] = mpu
+    sys.modules.pop("relax.backends.megatron.cp_utils", None)
+    cp_utils = importlib.import_module("relax.backends.megatron.cp_utils")
+
+    dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=2)
+    try:
+        local_values = torch.tensor([1.0] if rank == 0 else [2.0, 3.0, 4.0], requires_grad=True)
+        reducer = cp_utils.get_sequence_loss_aggregator(
+            "seq-mean-token-sum-norm",
+            total_lengths=[6],
+            response_lengths=[4],
+            loss_masks=[torch.ones(4)],
+            scale_factor=8,
+            dynamic_cp_size=2,
+            dynamic_cp_rank=rank,
+        )
+        local_loss = reducer(local_values)
+        step_token_normalizer = torch.tensor(float(local_values.numel()))
+        dist.all_reduce(step_token_normalizer, op=dist.ReduceOp.SUM)
+        scale = cp_utils.get_per_token_loss_scale(
+            num_microbatches=1,
+            global_batch_size=1,
+            data_parallel_world_size=2,
+            step_token_normalizer=step_token_normalizer,
+        )
+        (local_loss * scale).backward()
+
+        fixed_scale_gradient = local_values.grad / (step_token_normalizer * 2)
+        assert torch.equal(fixed_scale_gradient, torch.full_like(local_values, 1.0 / 8.0))
+
+        total_loss = local_loss.detach().clone()
+        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+        if rank == 0:
+            torch.save(
+                torch.stack([total_loss, step_token_normalizer, fixed_scale_gradient.mean()]),
+                result_path,
+            )
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.fixture()
 def cp_utils_module(monkeypatch):
     pytest.importorskip("torch")
@@ -171,3 +225,35 @@ def test_step_loss_normalizer_is_shared_by_each_microbatch_in_a_step(cp_utils_mo
     expanded = cp_utils_module.expand_step_loss_normalizers([first_step, second_step], [2, 3])
 
     assert expanded == [first_step, first_step, second_step, second_step, second_step]
+
+
+def test_static_cp_dr_grpo_matches_cp_one_fixed_scale_gradient(tmp_path, cp_utils_module):
+    torch = pytest.importorskip("torch")
+    if not torch.distributed.is_gloo_available():
+        pytest.skip("Gloo is required for the static CP process-group test.")
+
+    cp_one_values = torch.tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+    cp_one_reducer = cp_utils_module.get_sequence_loss_aggregator(
+        "seq-mean-token-sum-norm",
+        total_lengths=[6],
+        response_lengths=[4],
+        loss_masks=[torch.ones(4)],
+        scale_factor=8,
+    )
+    cp_one_loss = cp_one_reducer(cp_one_values)
+    cp_one_loss.backward()
+
+    init_file = tmp_path / "gloo-init"
+    result_path = tmp_path / "result.pt"
+    torch.multiprocessing.spawn(
+        _run_static_cp_dr_grpo_worker,
+        args=(f"file://{init_file}", str(result_path)),
+        nprocs=2,
+        join=True,
+    )
+
+    total_loss, step_token_normalizer, fixed_scale_gradient = torch.load(result_path, weights_only=True)
+
+    assert torch.isclose(total_loss, cp_one_loss.detach())
+    assert torch.isclose(step_token_normalizer, torch.tensor(4.0))
+    assert torch.isclose(fixed_scale_gradient, cp_one_values.grad.mean())
