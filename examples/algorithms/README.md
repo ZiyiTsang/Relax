@@ -84,10 +84,10 @@ export EXP_DIR=/path/to/experiments
 
 # 2) 运行 CISPO 异步训练（Fully Async 模式）
 cd /fengxiaoshi/Relax
-bash examples/algorithms/run-qwen35-9B-8xgpu-openr1mm-cispo-async.sh async
+bash examples/algorithms/cispo/run-qwen35-9B-8xgpu-openr1mm-cispo-async.sh async
 
 # 或运行同步训练（Colocate 模式）
-bash examples/algorithms/run-qwen35-9B-8xgpu-openr1mm-cispo-async.sh sync
+bash examples/algorithms/cispo/run-qwen35-9B-8xgpu-openr1mm-cispo-async.sh sync
 ```
 
 ### 示例：运行 GSPO（文本）
@@ -190,7 +190,7 @@ GSPO_ARGS=(
 ```
 examples/algorithms/
 ├── README.md                              (本文件)
-├── run-qwen35-9B-8xgpu-openr1mm-cispo-async.sh    (CISPO 多模态示例)
+├── cispo/run-qwen35-9B-8xgpu-openr1mm-cispo-async.sh    (CISPO 多模态示例)
 ├── ... (其他算法脚本)
 ```
 
