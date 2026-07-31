@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Relax Authors. All Rights Reserved.
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -51,6 +53,10 @@ class Sample:
     teacher_image_data: dict[str, list] | None = None  # base64-encoded teacher media for SGLang payload
     teacher_image_b64_list: list[str] | None = None  # raw base64-PNG list for OPD pre-expanded teacher path
     teacher_image_grid_thw: Any = None  # HF processor image_grid_thw, [[t, h, w], ...]
+    # ``None`` keeps ordinary OPSD samples backward-compatible. SDPO sets this
+    # to False when no usable solution/feedback exists, so the distillation
+    # loss can be masked without masking the GRPO policy loss.
+    sdpo_valid: bool | None = None
 
     class Status(Enum):
         PENDING = "pending"
@@ -212,7 +218,7 @@ class ParamInfo:
 # A dict-based batch produced along the rollout -> training path
 # In Megatron backend, several fields are converted to torch.Tensor lists on GPU
 # before being consumed by data iterators (see megatron_utils.actor._get_rollout_data).
-RolloutBatch = dict[str, list[torch.Tensor] | list[int] | list[float] | list[str]]
+RolloutBatch = dict[str, list[torch.Tensor] | list[int] | list[float] | list[bool] | list[str]]
 
 SFTBatch = dict[str, list[torch.Tensor] | list[int] | list[str] | dict | None]
 """SFT 训练 batch 的 dict alias。

@@ -3,12 +3,14 @@
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Sequence
+from time import monotonic
 
 import aiohttp
 import numpy as np
 
 from relax.utils.logging_utils import get_logger
 from relax.utils.opd import opd_main_worker, opd_opsd_worker
+from relax.utils.opd.sdpo import SDPO_TOKEN_SELECTION, SDPO_VALID_FIELD
 from relax.utils.types import Sample
 
 
@@ -116,12 +118,29 @@ class OpdManager:
     def is_opsd(self) -> bool:
         return self.opsd_worker is not None
 
+    def _validate_sdpo_configuration(self, samples: list[Sample]) -> list[Sample]:
+        sdpo_samples = [sample for sample in samples if (sample.metadata or {}).get("sdpo", False)]
+        if not sdpo_samples:
+            return []
+        if self.opsd_worker is None:
+            raise ValueError(
+                "SDPO samples require --opd-teacher-prompt-key so the dynamic teacher prompt path is enabled."
+            )
+        if self.topk_worker is None or self.topk_worker.spec.name != SDPO_TOKEN_SELECTION:
+            raise ValueError(
+                "SDPO only supports student_topk token selection; "
+                "set --opd-token-selection student_topk and --opd-log-prob-top-k > 0."
+            )
+        return sdpo_samples
+
     def schema_opd_transfer_data(self) -> list[str]:
         fields: list[str] = []
         if self.topk_worker is not None:
             fields.extend(self.topk_worker.topk_transfer_fields())
         if self.sampled_worker is not None:
             fields.extend(self.sampled_worker.sampled_transfer_fields())
+        if self.opsd_worker is not None:
+            fields.append(SDPO_VALID_FIELD)
         return fields
 
     def produce_opd_transfer_data(self, samples: list[Sample], train_data: dict) -> None:
@@ -145,6 +164,11 @@ class OpdManager:
         elif self.sampled_worker is not None:
             train_data[opd_main_worker.SampledTokenWorker.TRANSFER_TEACHER_LOG_PROBS] = [
                 s.teacher_log_probs if s.teacher_log_probs is not None else [] for s in samples
+            ]
+
+        if self.opsd_worker is not None:
+            train_data[SDPO_VALID_FIELD] = [
+                True if s.sdpo_valid is None else bool(s.sdpo_valid) for s in samples
             ]
 
     def before_rollout(self, payload: dict) -> None:
@@ -195,10 +219,27 @@ class OpdManager:
         encode_multimodal_inputs: EncodeMultimodalInputs | None = None,
     ) -> None:
         sample_list = list(samples) if isinstance(samples, Sequence) else [samples]
+        sdpo_samples = self._validate_sdpo_configuration(sample_list)
 
         if self.opsd_worker is not None:
+            if sdpo_samples:
+                from relax.utils.opd.sdpo import prepare_sdpo_teacher_prompts
+
+                prompt_stats = prepare_sdpo_teacher_prompts(
+                    sample_list,
+                    reward_key=getattr(self.args, "reward_key", None),
+                )
+                logger.info(
+                    "SDPO teacher prompt routing: valid=%d/%d feedback=%d used=%d successful_demo=%d",
+                    prompt_stats.valid_samples,
+                    prompt_stats.total_samples,
+                    prompt_stats.feedback_available,
+                    prompt_stats.feedback_used,
+                    prompt_stats.successful_demonstrations,
+                )
             await asyncio.gather(*[self.opsd_worker.build_teacher_inputs(self.args, s) for s in sample_list])
 
+        prefill_start = monotonic()
         async with _create_teacher_client_session(self.args) as session:
             fetch_results = await asyncio.gather(*[self._teacher_prefill(s, session) for s in sample_list])
             self._raise_if_all_failed(sample_list, fetch_results)
@@ -209,6 +250,12 @@ class OpdManager:
                 )
 
         self._assemble_transfer(sample_list)
+        if any((s.metadata or {}).get("sdpo", False) for s in sample_list):
+            logger.info(
+                "SDPO teacher prefill: requests=%d elapsed=%.3fs",
+                sum(int(int(s.response_length or 0) > 0) for s in sample_list),
+                monotonic() - prefill_start,
+            )
 
     async def _post_logprob(
         self,

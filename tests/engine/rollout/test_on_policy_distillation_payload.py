@@ -11,8 +11,11 @@ carried as sglang base64 fields, decoded into numpy arrays.
 
 import numpy as np
 import pybase64
+import pytest
 
+from relax.engine.rollout.on_policy_distillation import OpdManager
 from relax.utils.opd.opd_main_worker import LogprobResponse, TopkWorker
+from relax.utils.types import Sample
 
 
 def _b64(arr: np.ndarray) -> str:
@@ -65,6 +68,35 @@ def test_build_teacher_payload_adds_student_topk_query_ids() -> None:
     assert payload["return_logprob"] is True
     # _flatten_other_topk_ids: [[3,5],[7,9]] flattened + trailing [0]*top_k
     assert payload["token_ids_logprob"] == [3, 5, 7, 9, 0, 0]
+
+
+def test_sdpo_requires_student_topk() -> None:
+    manager = object.__new__(OpdManager)
+    manager.opsd_worker = object()
+    manager.topk_worker = TopkWorker("teacher_topk", top_k=2, opd_loss_coef=1.0)
+    sample = Sample(metadata={"sdpo": True})
+
+    with pytest.raises(ValueError, match="SDPO only supports student_topk"):
+        manager._validate_sdpo_configuration([sample])
+
+
+def test_sdpo_requires_dynamic_teacher_prompt_path() -> None:
+    manager = object.__new__(OpdManager)
+    manager.opsd_worker = None
+    manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
+    sample = Sample(metadata={"sdpo": True})
+
+    with pytest.raises(ValueError, match="opd-teacher-prompt-key"):
+        manager._validate_sdpo_configuration([sample])
+
+
+def test_sdpo_accepts_student_topk() -> None:
+    manager = object.__new__(OpdManager)
+    manager.opsd_worker = object()
+    manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
+    sample = Sample(metadata={"sdpo": True})
+
+    assert manager._validate_sdpo_configuration([sample]) == [sample]
 
 
 def test_build_transfer_channels_union_merges_and_pads() -> None:

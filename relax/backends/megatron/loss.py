@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Relax Authors. All Rights Reserved.
+
 from argparse import Namespace
 from collections.abc import Callable, Iterator
 from functools import partial
@@ -1018,6 +1020,7 @@ def policy_loss_function(
         log_probs=log_probs,
         old_log_probs=old_log_probs,
         log_probs_and_entropy=log_probs_and_entropy,
+        sum_of_sample_mean=sum_of_sample_mean,
     )
     if opd_loss is not None:
         loss = loss + opd_loss

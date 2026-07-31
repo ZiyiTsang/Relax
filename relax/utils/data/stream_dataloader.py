@@ -902,6 +902,8 @@ def post_process_rollout_data(args, rollout_data):
         or "multimodal_train_inputs" in rollout_data
         or getattr(args, "uses_unsplit_forward", False),
     )
+    if padded_total_lengths is not None:
+        rollout_data["padded_total_lengths"] = padded_total_lengths
 
     for key in [
         "log_probs",
@@ -953,6 +955,10 @@ def post_process_rollout_data(args, rollout_data):
         from relax.utils.opd.opd_main_worker import restore_opd_topk_rollout_fields
 
         restore_opd_topk_rollout_fields(rollout_data, args, cuda_dev)
+        if not getattr(args, "dynamic_context_parallel", False):
+            from relax.utils.opd.opd_utils import slice_opd_topk_rollout_fields
+
+            slice_opd_topk_rollout_fields(rollout_data, args)
 
     if "rollout_routed_experts" in rollout_data:
         from tensordict.tensorclass import NonTensorData
