@@ -96,11 +96,6 @@ def validate_args(args):
         assert args.calculate_per_token_loss, (
             "--calculate-per-token-loss must be set when context_parallel_size > 1 or dynamic_context_parallel is enabled (required by Megatron-Bridge)."
         )
-        if getattr(args, "pg_loss_aggregation", "seq-mean-token-mean") == "seq-mean-token-mean":
-            raise ValueError(
-                "--pg-loss-aggregation seq-mean-token-mean is incompatible with context parallelism. "
-                "Use --pg-loss-aggregation seq-mean-token-sum-norm for Dr.GRPO."
-            )
     return args
 
 

@@ -2477,6 +2477,12 @@ def _validate_pg_loss_aggregation(args: Any) -> None:
             "--pg-loss-aggregation seq-mean-token-sum-norm with --calculate-per-token-loss does not support "
             "--fully-async because its streaming iterator has no step-global token normalizer."
         )
+    if getattr(args, "grpo_std_normalization", True):
+        logger.warning(
+            "--pg-loss-aggregation seq-mean-token-sum-norm changes only the length normalization; "
+            "without --disable-grpo-std-normalization the group-mean advantage is still std-normalized. "
+            "This is not the Dr.GRPO objective from https://arxiv.org/pdf/2503.20783."
+        )
 
 
 def slime_validate_args(args):

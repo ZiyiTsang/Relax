@@ -28,8 +28,8 @@ from relax.utils.training.flops_counter import FlopsCounter
 from relax.utils.types import RolloutBatch
 
 from .cp_utils import (
-    expand_step_loss_normalizers,
     dynamic_cp_split_data,
+    expand_step_loss_normalizers,
     get_sum_of_sample_mean,
     maybe_padded_total_lengths,
     slice_log_prob_with_cp,
@@ -822,6 +822,30 @@ def get_data_iterator(
     if step_local_sample_counts is None:
         step_local_sample_counts = [num_local_gbs for _ in range(num_steps_per_rollout)]
 
+    # Dr.GRPO fixed-sum mode pre-scales every micro-batch of a step by the same
+    # DP/CP-global masked response-token count that Megatron's per-token finalizer
+    # later divides out. Compute it once and inject it at the construction points
+    # below instead of rebuilding the iterator.
+    use_fixed_sum_normalizer = (
+        args.calculate_per_token_loss
+        and getattr(args, "pg_loss_aggregation", "seq-mean-token-mean") == "seq-mean-token-sum-norm"
+    )
+    step_loss_normalizers: list[torch.Tensor] | None = None
+    if use_fixed_sum_normalizer:
+        step_offsets = np.cumsum([0, *step_local_sample_counts]).tolist()
+        masks = rollout_data["loss_masks"]
+        normalizer_device = masks[0].device if masks else device_utils.make_current_torch_device()
+        zero = torch.zeros((), dtype=torch.float, device=normalizer_device)
+        step_token_counts = [
+            sum((mask.sum() for mask in masks[step_offsets[i] : step_offsets[i + 1]]), zero)
+            for i in range(num_steps_per_rollout)
+        ]
+        local_normalizers = torch.stack(step_token_counts).to(
+            device=device_utils.make_current_torch_device(), dtype=torch.float
+        )
+        dist.all_reduce(local_normalizers, op=dist.ReduceOp.SUM, group=dp_group)
+        step_loss_normalizers = local_normalizers.unbind()
+
     if not args.use_dynamic_batch_size:
         invalid_counts = [count for count in step_local_sample_counts if count % args.micro_batch_size != 0]
         if invalid_counts:
@@ -830,7 +854,14 @@ def get_data_iterator(
                 f"got invalid_counts={invalid_counts}, micro_batch_size={args.micro_batch_size}"
             )
         num_microbatches = [count // args.micro_batch_size for count in step_local_sample_counts]
-        data_iterator = _generate_data_iterator(rollout_data, args.micro_batch_size)
+        per_microbatch_loss_normalizers = (
+            expand_step_loss_normalizers(step_loss_normalizers, num_microbatches)
+            if step_loss_normalizers is not None
+            else None
+        )
+        data_iterator = _generate_data_iterator(
+            rollout_data, args.micro_batch_size, per_microbatch_loss_normalizers=per_microbatch_loss_normalizers
+        )
     else:
         _max_tokens = max_tokens_per_gpu if max_tokens_per_gpu is not None else args.max_tokens_per_gpu
         assert _max_tokens is not None
@@ -885,29 +916,13 @@ def get_data_iterator(
         logger.info(
             f"After dynamic batching, num_microbatches: {num_microbatches}, micro_batch_indices: {micro_batch_indices}"
         )
-        data_iterator = _generate_data_iterator(rollout_data, None, micro_batch_indices, _max_tokens)
-
-    if (
-        args.calculate_per_token_loss
-        and getattr(args, "pg_loss_aggregation", "seq-mean-token-mean") == "seq-mean-token-sum-norm"
-    ):
-        step_offsets = np.cumsum([0, *step_local_sample_counts]).tolist()
-        local_normalizers = torch.stack(
-            [
-                sum(loss_mask.sum() for loss_mask in rollout_data["loss_masks"][step_offsets[i] : step_offsets[i + 1]])
-                for i in range(num_steps_per_rollout)
-            ]
-        ).to(
-            device=device_utils.make_current_torch_device(), dtype=torch.float
+        per_microbatch_loss_normalizers = (
+            expand_step_loss_normalizers(step_loss_normalizers, num_microbatches)
+            if step_loss_normalizers is not None
+            else None
         )
-        dist.all_reduce(local_normalizers, op=dist.ReduceOp.SUM, group=dp_group)
-        per_microbatch_loss_normalizers = expand_step_loss_normalizers(local_normalizers.unbind(), num_microbatches)
         data_iterator = _generate_data_iterator(
-            rollout_data,
-            args.micro_batch_size if not args.use_dynamic_batch_size else None,
-            micro_batch_indices if args.use_dynamic_batch_size else None,
-            _max_tokens if args.use_dynamic_batch_size else None,
-            per_microbatch_loss_normalizers,
+            rollout_data, None, micro_batch_indices, _max_tokens, per_microbatch_loss_normalizers
         )
 
     return (

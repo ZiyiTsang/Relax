@@ -134,12 +134,8 @@ def test_seq_mean_token_sum_norm_cp_shards_sum_to_single_rank_value(cp_utils_mod
         "scale_factor": 8,
         "dynamic_cp_size": 2,
     }
-    rank_zero = cp_utils_module.get_sequence_loss_aggregator(
-        "seq-mean-token-sum-norm", dynamic_cp_rank=0, **kwargs
-    )
-    rank_one = cp_utils_module.get_sequence_loss_aggregator(
-        "seq-mean-token-sum-norm", dynamic_cp_rank=1, **kwargs
-    )
+    rank_zero = cp_utils_module.get_sequence_loss_aggregator("seq-mean-token-sum-norm", dynamic_cp_rank=0, **kwargs)
+    rank_one = cp_utils_module.get_sequence_loss_aggregator("seq-mean-token-sum-norm", dynamic_cp_rank=1, **kwargs)
 
     cp_sum = rank_zero(torch.tensor([1.0])) + rank_one(torch.tensor([2.0, 3.0, 4.0]))
 
@@ -257,3 +253,67 @@ def test_static_cp_dr_grpo_matches_cp_one_fixed_scale_gradient(tmp_path, cp_util
     assert torch.isclose(total_loss, cp_one_loss.detach())
     assert torch.isclose(step_token_normalizer, torch.tensor(4.0))
     assert torch.isclose(fixed_scale_gradient, cp_one_values.grad.mean())
+
+
+def test_padding_kwargs_preserve_fixed_sum_result(cp_utils_module):
+    import torch
+
+    kwargs = {
+        "total_lengths": [6],
+        "response_lengths": [4],
+        "loss_masks": [torch.ones(4)],
+        "scale_factor": 8,
+        "dynamic_cp_size": 2,
+    }
+    base_zero = cp_utils_module.get_sequence_loss_aggregator("seq-mean-token-sum-norm", dynamic_cp_rank=0, **kwargs)
+    base_one = cp_utils_module.get_sequence_loss_aggregator("seq-mean-token-sum-norm", dynamic_cp_rank=1, **kwargs)
+    padded_zero = cp_utils_module.get_sequence_loss_aggregator(
+        "seq-mean-token-sum-norm", dynamic_cp_rank=0, padded_total_lengths=[8], **kwargs
+    )
+    padded_one = cp_utils_module.get_sequence_loss_aggregator(
+        "seq-mean-token-sum-norm", dynamic_cp_rank=1, padded_total_lengths=[8], **kwargs
+    )
+    bshd_zero = cp_utils_module.get_sequence_loss_aggregator(
+        "seq-mean-token-sum-norm", dynamic_cp_rank=0, qkv_format="bshd", max_seq_lens=[8], **kwargs
+    )
+    bshd_one = cp_utils_module.get_sequence_loss_aggregator(
+        "seq-mean-token-sum-norm", dynamic_cp_rank=1, qkv_format="bshd", max_seq_lens=[8], **kwargs
+    )
+
+    x_zero = torch.tensor([1.0])
+    x_one = torch.tensor([2.0, 3.0, 4.0])
+
+    plain = base_zero(x_zero) + base_one(x_one)
+    assert torch.equal(plain, padded_zero(x_zero) + padded_one(x_one))
+    assert torch.equal(plain, bshd_zero(x_zero) + bshd_one(x_one))
+    assert torch.isclose(plain, torch.tensor(10.0 / 8.0))
+
+
+def test_sum_norm_reweights_short_vs_long_responses(cp_utils_module):
+    import torch
+
+    total_lengths = [8, 512]
+    response_lengths = [8, 512]
+    loss_masks = [torch.ones(8), torch.ones(512)]
+    values = torch.ones(520)
+
+    seq_mean = cp_utils_module.get_sequence_loss_aggregator(
+        "seq-mean-token-mean", total_lengths, response_lengths, loss_masks
+    )
+    sum_norm = cp_utils_module.get_sequence_loss_aggregator(
+        "seq-mean-token-sum-norm", total_lengths, response_lengths, loss_masks, scale_factor=8
+    )
+
+    seq_mean_loss = seq_mean(values)
+    sum_norm_loss = sum_norm(values)
+
+    # Per-response mean is 1.0, so seq-mean weights the two responses equally (1:1).
+    assert torch.isclose(seq_mean_loss, torch.tensor(2.0))
+    # Fixed-sum weights every token equally: (8 + 512) / S.
+    assert torch.isclose(sum_norm_loss, torch.tensor(520.0 / 8.0))
+    # The long response's share of the total loss grows from 1/2 (seq-mean) to
+    # 512/520 (sum-norm), proving the length weighting actually changed.
+    seq_mean_long_share = torch.tensor(1.0) / seq_mean_loss
+    sum_norm_long_share = torch.tensor(512.0 / 8.0) / sum_norm_loss
+    assert torch.isclose(seq_mean_long_share, torch.tensor(0.5))
+    assert sum_norm_long_share > seq_mean_long_share

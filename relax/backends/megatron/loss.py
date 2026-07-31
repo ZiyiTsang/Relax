@@ -1387,7 +1387,6 @@ def loss_function(
                 global_batch_size,
                 mpu.get_data_parallel_world_size(with_context_parallel=True),
                 per_token_loss_normalizer,
-                explicit_loss_scale,
             )
         # Non-dummy per-token path: do NOT scale by cp_size. `loss` is the
         # CP-local token-sum; finalize_model_grads normalizes the summed gradient

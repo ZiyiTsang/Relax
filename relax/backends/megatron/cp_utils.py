@@ -212,14 +212,9 @@ def get_per_token_loss_scale(
     global_batch_size: int,
     data_parallel_world_size: int,
     step_token_normalizer: float | torch.Tensor,
-    explicit_loss_scale: float | None = None,
 ) -> float | torch.Tensor:
     """Scale a fixed-normalized loss before Megatron's per-token finalizer."""
-    base_scale = (
-        explicit_loss_scale
-        if explicit_loss_scale is not None
-        else num_microbatches / global_batch_size * data_parallel_world_size
-    )
+    base_scale = num_microbatches / global_batch_size * data_parallel_world_size
     return base_scale * step_token_normalizer
 
 
