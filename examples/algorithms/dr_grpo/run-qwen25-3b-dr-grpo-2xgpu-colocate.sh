@@ -29,10 +29,10 @@ DATA_DIR="${DATA_DIR:-${EXP_DIR}}"
 NUM_ROLLOUT="${NUM_ROLLOUT:=100}"
 
 CKPT_ARGS=(
-   --hf-checkpoint ${MODEL_DIR}/Qwen2.5-3B-Instruct/
-   --ref-load ${MODEL_DIR}/Qwen2.5-3B-Instruct/
+   --hf-checkpoint ${MODEL_DIR}/Qwen2.5-3B/
+   --ref-load ${MODEL_DIR}/Qwen2.5-3B/
    --megatron-to-hf-mode bridge
-   --save ${EXP_DIR}/Qwen2.5-3B-Instruct_mcore_2xgpu/
+   --save ${EXP_DIR}/Qwen2.5-3B_mcore_2xgpu/
    --save-interval 100
    --max-actor-ckpt-to-keep 1
 )
