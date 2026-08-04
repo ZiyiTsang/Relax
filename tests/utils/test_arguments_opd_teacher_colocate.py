@@ -1,41 +1,16 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 import argparse
-import importlib
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
 
 @pytest.fixture()
-def arguments_module(monkeypatch):
-    router_pkg = ModuleType("sglang_router")
-    launch_router = ModuleType("sglang_router.launch_router")
-    launch_router.RouterArgs = object
-    monkeypatch.setitem(sys.modules, "sglang_router", router_pkg)
-    monkeypatch.setitem(sys.modules, "sglang_router.launch_router", launch_router)
+def arguments_module():
+    import relax.utils.arguments as module
 
-    sglang_arguments = ModuleType("relax.backends.sglang.arguments")
-    sglang_arguments.sglang_parse_args = lambda: None
-    sglang_arguments.validate_args = lambda args: args
-    monkeypatch.setitem(sys.modules, "relax.backends.sglang.arguments", sglang_arguments)
-
-    device = ModuleType("relax.utils.device")
-    device.get_dist_backend = lambda: "gloo"
-    monkeypatch.setitem(sys.modules, "relax.utils.device", device)
-
-    eval_config = ModuleType("relax.utils.training.eval_config")
-    eval_config.EvalDatasetConfig = dict
-    eval_config.build_eval_dataset_configs = lambda args, datasets_config, defaults: []
-    eval_config.build_named_prompt_data_configs = lambda values: []
-    eval_config.ensure_dataset_list = lambda values: values or []
-    monkeypatch.setitem(sys.modules, "relax.utils.training.eval_config", eval_config)
-
-    sys.modules.pop("relax.utils.arguments", None)
-    module = importlib.import_module("relax.utils.arguments")
-    yield module
-    sys.modules.pop("relax.utils.arguments", None)
+    return module
 
 
 @pytest.mark.parametrize(
@@ -79,6 +54,8 @@ def _opd_args() -> SimpleNamespace:
         use_opd=True,
         opd_kl_coef=1.0,
         opd_loss_coef=0.0,
+        opd_loss_mode="opd",
+        calculate_per_token_loss=True,
         opd_teacher_prompt_key=None,
         opd_teacher_image_key=None,
         opd_teacher_video_key=None,
@@ -152,6 +129,7 @@ def _opd_args() -> SimpleNamespace:
         rollout_max_context_len=None,
         rollout_max_prompt_len=None,
         qkv_format="sbhd",
+        allgather_cp=False,
         train_backend="megatron",
         only_train_params_name_list=None,
         freeze_params_name_list=None,
@@ -174,6 +152,98 @@ def test_opd_sampled_token_loss_is_accepted(arguments_module):
     # student_sampled + loss mode is supported via the 1D reverse-KL path
     # (see compute_policy_opd_loss); validation must not reject it.
     arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_loss_mode_is_parsed_and_validated(arguments_module):
+    arguments_module.RouterArgs = SimpleNamespace(add_cli_args=lambda parser, **_kwargs: parser)
+    parser = argparse.ArgumentParser()
+    arguments_module.get_slime_extra_args_provider()(parser)
+    parsed = parser.parse_args(["--opd-loss-mode", "sdpo"])
+
+    assert parsed.opd_loss_mode == "sdpo"
+
+    args = _opd_args()
+    args.opd_loss_mode = "sdpo"
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.opd_kl_coef = 0.0
+    args.opd_loss_coef = 1.0
+    arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_loss_mode_rejects_non_student_topk(arguments_module):
+    args = _opd_args()
+    args.opd_loss_mode = "sdpo"
+    args.opd_token_selection = "teacher_topk"
+    args.opd_log_prob_top_k = 2
+    args.opd_kl_coef = 0.0
+    args.opd_loss_coef = 1.0
+
+    with pytest.raises(ValueError, match="only supports --opd-token-selection=student_topk"):
+        arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_loss_mode_rejects_sampled_only_kl_estimator(arguments_module):
+    args = _opd_args()
+    args.opd_loss_mode = "sdpo"
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.opd_kl_type = "low_var_kl"
+    args.opd_kl_coef = 0.0
+    args.opd_loss_coef = 1.0
+
+    with pytest.raises(ValueError, match="supports only --opd-kl-type"):
+        arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_loss_mode_rejects_pipeline_parallel(arguments_module):
+    args = _opd_args()
+    args.opd_loss_mode = "sdpo"
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.opd_kl_coef = 0.0
+    args.opd_loss_coef = 1.0
+    args.pipeline_model_parallel_size = 2
+
+    with pytest.raises(ValueError, match="does not support pipeline parallelism"):
+        arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_loss_mode_rejects_mtp_auxiliary_loss(arguments_module):
+    args = _opd_args()
+    args.opd_loss_mode = "sdpo"
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.opd_kl_coef = 0.0
+    args.opd_loss_coef = 1.0
+    args.enable_mtp_training = True
+
+    with pytest.raises(ValueError, match="does not support MTP auxiliary loss"):
+        arguments_module.slime_validate_args(args)
+
+
+@pytest.mark.parametrize("field_name", ["multimodal_keys", "opd_teacher_image_key", "opd_teacher_video_key"])
+def test_sdpo_loss_mode_rejects_multimodal_configuration(arguments_module, field_name):
+    args = _opd_args()
+    args.opd_loss_mode = "sdpo"
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.opd_kl_coef = 0.0
+    args.opd_loss_coef = 1.0
+    setattr(args, field_name, {"image": "image"} if field_name == "multimodal_keys" else "media")
+
+    with pytest.raises(ValueError, match="only supports text inputs"):
+        arguments_module.slime_validate_args(args)
+
+
+def test_topk_opd_rejects_allgather_context_parallel(arguments_module):
+    args = _opd_args()
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.allgather_cp = True
+
+    with pytest.raises(ValueError, match="not compatible with --allgather-cp"):
+        arguments_module.slime_validate_args(args)
 
 
 def test_managed_opd_teacher_colocate_preserves_rollout_resource_split(arguments_module):

@@ -49,12 +49,16 @@ def _score_sciknoweval(sample: Any) -> dict[str, Any]:
 
 
 def _extract_tool_calls(response: str) -> tuple[list[str], dict[str, Any], bool]:
-    actions = re.findall(r"Action:\s*([\w.-]+)", response, flags=re.IGNORECASE)
+    actions = [
+        action.strip()
+        for action in re.findall(r"^\s*Action:\s*(.+?)\s*$", response, flags=re.IGNORECASE | re.MULTILINE)
+    ]
     inputs: dict[str, Any] = {}
     format_ok = bool(re.search(r"Action:.*?\nAction Input:", response, flags=re.IGNORECASE | re.DOTALL))
-    for block in re.findall(r"Action Input:\s*({.*?})", response, flags=re.IGNORECASE | re.DOTALL):
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"Action Input:\s*", response, flags=re.IGNORECASE):
         try:
-            value = json.loads(block)
+            value, _ = decoder.raw_decode(response, match.end())
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
@@ -69,7 +73,7 @@ def _golden_tool_call(metadata: dict[str, Any]) -> tuple[list[str], dict[str, An
             golden = json.loads(golden)
         except json.JSONDecodeError:
             golden = []
-    actions = [str(item.get("Action", "")) for item in golden if isinstance(item, dict)]
+    actions = [str(item.get("Action", "")).strip() for item in golden if isinstance(item, dict)]
     inputs: dict[str, Any] = {}
     for item in golden:
         if not isinstance(item, dict):
@@ -91,7 +95,7 @@ def _score_toolalpaca(sample: Any) -> dict[str, Any]:
     expected_actions, expected_inputs = _golden_tool_call(metadata)
     actions_correct = Counter(predicted_actions) == Counter(expected_actions)
     inputs_correct = predicted_inputs == expected_inputs
-    correct = actions_correct and inputs_correct
+    correct = format_ok and actions_correct and inputs_correct
     feedback_parts = []
     if not actions_correct:
         feedback_parts.append("The selected tool action does not match the request.")
@@ -122,8 +126,8 @@ def score(_args: Any, samples: Any) -> dict[str, Any] | list[dict[str, Any]]:
 
     Relax calls this function with a list in ``--group-rm`` mode and with one
     ``Sample`` otherwise.  Returning only reward payloads keeps the reward
-    worker process isolated; the core rollout path later uses those payloads
-    to build dynamic teacher prompts.
+    worker process isolated; the core rollout path later uses those payloads to
+    build dynamic teacher prompts.
     """
 
     if isinstance(samples, list):

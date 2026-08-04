@@ -294,10 +294,23 @@ async def _encode_multimodal_inputs(multimodal_inputs: dict) -> tuple[dict[str, 
     return encoded, monotonic() - t_start
 
 
+def _validate_sdpo_sample(args: Namespace, sample: Sample | list[Sample]) -> None:
+    if getattr(args, "opd_loss_mode", "opd") != "sdpo":
+        return
+    from relax.utils.opd.sdpo import validate_sdpo_text_only
+
+    if isinstance(sample, list):
+        for item in sample:
+            validate_sdpo_text_only(item)
+    else:
+        validate_sdpo_text_only(sample)
+
+
 async def generate(
     args: Namespace, sample: Sample, sampling_params: dict[str, Any], evaluation: bool = False
 ) -> Sample:
     """Generate using traditional SGLang router with token-based workflow."""
+    _validate_sdpo_sample(args, sample)
     if args.ci_test:
         assert isinstance(sample.prompt, str)
 
@@ -551,6 +564,7 @@ async def generate_and_rm(
     sampling_params: dict[str, Any],
     evaluation: bool = False,
 ) -> Sample | list[Sample]:
+    _validate_sdpo_sample(args, sample)
     # mask previous off-policy generation for partial rollout
     if args.partial_rollout and args.mask_offpolicy_in_partial_rollout and sample.response_length > 0:
         sample.loss_mask = [0] * sample.response_length
@@ -635,6 +649,8 @@ def _aggregate_rollout_timing(all_samples: list[Sample], get_samples_times: list
 async def generate_and_rm_group(
     args: Namespace, group: list[Sample], sampling_params: dict[str, Any], evaluation: bool = False
 ) -> list[Sample]:
+    for sample in group:
+        _validate_sdpo_sample(args, sample)
     state = GenerateState(args)
 
     # eval requests should not be affected by abort state; only skip for training rollout

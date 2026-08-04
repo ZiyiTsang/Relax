@@ -3,8 +3,6 @@
 import pytest
 import torch
 
-pytest.importorskip("tensordict")
-
 from relax.utils.utils import dict_to_tensordict
 
 

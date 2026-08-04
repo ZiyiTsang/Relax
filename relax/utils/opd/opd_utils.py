@@ -12,8 +12,6 @@ import torch
 import torch.distributed as dist
 
 from relax.utils.logging_utils import get_logger
-from relax.utils.opd import opd_opsd_worker
-from relax.utils.opd.sdpo import SDPO_VALID_FIELD
 
 
 if TYPE_CHECKING:
@@ -21,6 +19,8 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+PREEXPANDED_RAW_FORMAT = "opd_preexpanded_raw"
 
 OPD_TOKEN_SELECTIONS = ("student_sampled", "student_topk", "teacher_topk", "union")
 OPD_KL_TYPES = ("reverse_kl", "forward_kl", "low_var_kl", "jsd")
@@ -31,7 +31,6 @@ OPD_ROLLOUT_LOG_SKIP_FIELDS = frozenset(
         "opd_topk_student_log_probs",
         "opd_topk_teacher_log_probs",
         "opd_topk_ksz",
-        SDPO_VALID_FIELD,
     }
 )
 
@@ -485,6 +484,13 @@ def add_opd_arguments(parser: Any) -> Any:
         default=0.0,
         help=("On-policy distillation KL coefficient, Default 0.0."),
     )
+    parser.add_argument(
+        "--opd-loss-mode",
+        type=str,
+        choices=("opd", "sdpo"),
+        default="opd",
+        help="Select the ordinary OPD criterion or the static-teacher SDPO criterion.",
+    )
 
     parser.add_argument(
         "--opd-only-reward",
@@ -588,10 +594,7 @@ def add_opd_arguments(parser: Any) -> Any:
         "--opd-jsd-alpha",
         type=float,
         default=0.5,
-        help=(
-            "Mixture coefficient for --opd-kl-type=jsd. "
-            "Reference convention: 0.0=forward KL, 0.5=JSD, 1.0=reverse KL."
-        ),
+        help="Mixture coefficient for --opd-kl-type=jsd. 0.0 reduces to reverse_kl, 1.0 to forward_kl.",
     )
     parser.add_argument(
         "--opd-norm-mode",
@@ -691,6 +694,33 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
     if token_selection != "student_sampled":
         if args.opd_log_prob_top_k <= 0:
             raise ValueError(f"--opd-token-selection={token_selection} requires --opd-log-prob-top-k > 0 ")
+        if getattr(args, "allgather_cp", False):
+            raise ValueError(
+                "OPD Top-K token selection is not compatible with --allgather-cp; "
+                "use the standard zig-zag context-parallel layout."
+            )
+
+    loss_mode = getattr(args, "opd_loss_mode", "opd")
+    if loss_mode == "sdpo":
+        if args.opd_type != "sglang":
+            raise ValueError("--opd-loss-mode=sdpo currently requires --opd-type=sglang.")
+        if int(getattr(args, "pipeline_model_parallel_size", 1)) != 1:
+            raise ValueError("--opd-loss-mode=sdpo does not support pipeline parallelism.")
+        if getattr(args, "enable_mtp_training", False):
+            raise ValueError("--opd-loss-mode=sdpo does not support MTP auxiliary loss.")
+        if token_selection != "student_topk":
+            raise ValueError("--opd-loss-mode=sdpo only supports --opd-token-selection=student_topk.")
+        if args.opd_kl_type not in ("forward_kl", "reverse_kl", "jsd"):
+            raise ValueError("--opd-loss-mode=sdpo supports only --opd-kl-type=forward_kl, reverse_kl, or jsd.")
+        if getattr(args, "opd_norm_mode", "tail") == "trunc":
+            raise ValueError("--opd-loss-mode=sdpo requires --opd-norm-mode=tail or norm.")
+        if not getattr(args, "calculate_per_token_loss", False):
+            raise ValueError("--opd-loss-mode=sdpo requires --calculate-per-token-loss.")
+        if getattr(args, "multimodal_keys", None) or any(
+            getattr(args, field_name, None) is not None
+            for field_name in ("opd_teacher_image_key", "opd_teacher_video_key", "opd_teacher_audio_key")
+        ):
+            raise ValueError("--opd-loss-mode=sdpo only supports text inputs; multimodal fields are not supported.")
 
     kl_type = args.opd_kl_type
     if token_selection == "student_sampled" and kl_type not in ("reverse_kl", "low_var_kl"):
@@ -712,6 +742,8 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             "Use --opd-kl-coef=X --opd-loss-coef=0.0 for advantage mode, or "
             "--opd-kl-coef=0.0 --opd-loss-coef=X for loss mode."
         )
+    if loss_mode == "sdpo" and (opd_kl_coef != 0.0 or opd_loss_coef <= 0.0):
+        raise ValueError("--opd-loss-mode=sdpo requires --opd-kl-coef=0 and a positive --opd-loss-coef.")
 
     if getattr(args, "opd_teacher_prompt_key", None) is not None:
         if args.opd_type != "sglang":
@@ -860,7 +892,7 @@ async def build_teacher_preexpanded_image_data(sample: "Sample") -> list | None:
         return None
     return [
         {
-            "format": opd_opsd_worker.PREEXPANDED_RAW_FORMAT,
+            "format": PREEXPANDED_RAW_FORMAT,
             "images_b64": list(image_b64_list),
             "image_grid_thw": _to_jsonable(image_grid_thw),
         }
@@ -884,7 +916,7 @@ async def build_student_preexpanded_image_data(sample: "Sample") -> list | None:
     cached = await _encode_images_b64(raw_images, "_student_image_b64_cache", student_mm_in)
     return [
         {
-            "format": opd_opsd_worker.PREEXPANDED_RAW_FORMAT,
+            "format": PREEXPANDED_RAW_FORMAT,
             "images_b64": cached,
             "image_grid_thw": _to_jsonable(image_grid_thw),
         }
@@ -900,7 +932,9 @@ def _get_opd_transfer_schema(args: Namespace) -> list[str]:
 def consume_opd_train_data(data_fields: list[str], args: Namespace) -> None:
     if not (getattr(args, "use_opd", False) and getattr(args, "opd_type", None) == "sglang"):
         return
-    data_fields.extend(_get_opd_transfer_schema(args))
+    for field_name in _get_opd_transfer_schema(args):
+        if field_name not in data_fields:
+            data_fields.append(field_name)
 
 
 def consume_opd_advantage_data(data_fields: list[str], args: Namespace) -> None:
@@ -1011,131 +1045,16 @@ def slice_opd_topk_rollout_fields(
     dynamic_cp_size: int | None = None,
     dynamic_cp_rank: int | None = None,
 ) -> None:
-    """Slice per-response OPD top-k fields to the local zig-zag CP layout.
+    """Apply the shared CP response-row layout to ordinary OPD Top-K fields."""
 
-    Rollout-side top-k arrays are collected over the complete response.  The
-    Megatron forward pass, however, emits logits for only the local CP shard.
-    Keeping the arrays unsliced makes the top-k distillation path silently pair
-    teacher rows with the wrong response positions.  This helper applies the
-    same offset calculation used for ordinary response log-probabilities to
-    token ids, student log-probabilities, teacher log-probabilities, and the
-    ragged union lengths.
+    from relax.utils.opd.topk_layout import slice_opd_topk_rollout_fields as slice_topk_layout
 
-    ``allgather_cp=True`` is intentionally rejected by the existing OPD
-    validator because its contiguous global layout needs a separate
-    redistribution step for the 2-D top-k tensors.
-    """
-
-    if args.opd_token_selection not in ("student_topk", "teacher_topk", "union"):
-        return
-
-    from megatron.core import mpu
-    from relax.backends.megatron.cp_utils import get_logits_and_tokens_offset_with_cp, slice_log_prob_with_cp
-    from relax.utils.opd.opd_main_worker import TopkWorker
-
-    cp_size = dynamic_cp_size if dynamic_cp_size is not None else mpu.get_context_parallel_world_size()
-    if cp_size <= 1:
-        return
-    if getattr(args, "allgather_cp", False):
-        raise NotImplementedError(
-            "OPD top-k fields require zig-zag CP slicing; allgather_cp=True is not supported yet."
-        )
-
-    total_lengths = rollout_data["total_lengths"]
-    response_lengths = rollout_data["response_lengths"]
-    max_seq_lens = rollout_data.get("max_seq_lens")
-    padded_total_lengths = rollout_data.get("padded_total_lengths")
-    local_response_lengths = []
-    for i, (total_length, response_length) in enumerate(zip(total_lengths, response_lengths, strict=True)):
-        _, _, logits_offsets, _ = get_logits_and_tokens_offset_with_cp(
-            int(total_length),
-            int(response_length),
-            args.qkv_format,
-            max_seq_lens[i] if max_seq_lens is not None else None,
-            padded_total_lengths[i] if padded_total_lengths is not None else None,
-            dynamic_cp_size=dynamic_cp_size,
-            dynamic_cp_rank=dynamic_cp_rank,
-        )
-        local_response_lengths.append(sum(end - start for start, end in logits_offsets))
-    fields = (
-        TopkWorker.TRANSFER_TOKEN_IDS,
-        TopkWorker.TRANSFER_STUDENT_LOG_PROBS,
-        TopkWorker.TRANSFER_TEACHER_LOG_PROBS,
+    slice_topk_layout(
+        rollout_data,
+        args,
+        dynamic_cp_size=dynamic_cp_size,
+        dynamic_cp_rank=dynamic_cp_rank,
     )
-
-    for field in fields:
-        values = rollout_data.get(field)
-        if values is None:
-            continue
-        sliced_values = []
-        for i, value in enumerate(values):
-            if value is None:
-                sliced_values.append(None)
-                continue
-            tensor = torch.as_tensor(value)
-            if tensor.numel() == 0:
-                k_size = tensor.shape[-1] if tensor.ndim > 1 else 0
-                sliced_values.append(tensor.reshape(0, k_size))
-                continue
-            if tensor.ndim != 2:
-                raise ValueError(f"OPD top-k field {field!r} must have shape [response, K], got {tensor.shape}")
-            columns = []
-            for column in range(tensor.size(1)):
-                columns.append(
-                    slice_log_prob_with_cp(
-                        tensor[:, column],
-                        int(total_lengths[i]),
-                        int(response_lengths[i]),
-                        args.qkv_format,
-                        max_seq_lens[i] if max_seq_lens is not None else None,
-                        padded_total_length=(
-                            padded_total_lengths[i] if padded_total_lengths is not None else None
-                        ),
-                        dynamic_cp_size=dynamic_cp_size,
-                        dynamic_cp_rank=dynamic_cp_rank,
-                    )
-                )
-            sliced_tensor = torch.stack(columns, dim=1)
-            expected_rows = local_response_lengths[i]
-            if sliced_tensor.size(0) != expected_rows:
-                raise ValueError(
-                    "OPD top-k CP row mismatch: "
-                    f"field={field!r}, sample={i}, rows={sliced_tensor.size(0)}, expected={expected_rows}"
-                )
-            sliced_values.append(sliced_tensor)
-        rollout_data[field] = sliced_values
-
-    if args.opd_token_selection == "union":
-        values = rollout_data.get(TopkWorker.TRANSFER_K_LENGTHS)
-        if values is not None:
-            sliced_lengths = []
-            for i, value in enumerate(values):
-                if value is None:
-                    sliced_lengths.append(None)
-                    continue
-                tensor = torch.as_tensor(value)
-                if tensor.numel() == 0:
-                    sliced_lengths.append(tensor.reshape(0))
-                    continue
-                sliced = slice_log_prob_with_cp(
-                    tensor,
-                    int(total_lengths[i]),
-                    int(response_lengths[i]),
-                    args.qkv_format,
-                    max_seq_lens[i] if max_seq_lens is not None else None,
-                    padded_total_length=(padded_total_lengths[i] if padded_total_lengths is not None else None),
-                    dynamic_cp_size=dynamic_cp_size,
-                    dynamic_cp_rank=dynamic_cp_rank,
-                )
-                expected_rows = local_response_lengths[i]
-                if len(sliced) != expected_rows:
-                    raise ValueError(
-                        "OPD union top-k CP row mismatch: "
-                        f"field={TopkWorker.TRANSFER_K_LENGTHS!r}, sample={i}, "
-                        f"rows={len(sliced)}, expected={expected_rows}"
-                    )
-                sliced_lengths.append(sliced)
-            rollout_data[TopkWorker.TRANSFER_K_LENGTHS] = sliced_lengths
 
 
 def compute_log_probs_on_topk_token_ids(
@@ -1190,6 +1109,12 @@ def compute_log_probs_on_topk_token_ids(
     vocab_end = vocab_start + vocab_size_per_rank
 
     ids = topk_token_ids.to(device=logits.device, dtype=torch.long)  # [S, K]
+    global_vocab_size = vocab_size_per_rank * tp_world_size
+    if torch.any(ids >= global_vocab_size):
+        raise ValueError(
+            f"Top-K token ids must be below the global vocabulary size {global_vocab_size}; "
+            f"got max id {int(ids.max().detach().cpu())}."
+        )
     invalid = ids < 0
     safe_ids = ids.clamp(min=0)
     in_range = (safe_ids >= vocab_start) & (safe_ids < vocab_end)
@@ -1261,6 +1186,16 @@ def compute_opd_kl(
         if not (0.0 <= jsd_alpha <= 1.0):
             raise ValueError(f"jsd_alpha must be in [0, 1], got {jsd_alpha}")
 
+        from relax.utils.opd.topk_mask import OPDDistributionTopKMaskEstimator
+
+        mask_estimate = OPDDistributionTopKMaskEstimator.estimate(
+            mask,
+            norm_mode=norm_mode,
+            include_tail_bucket=False,
+        )
+        # Ordinary OPD keeps its historical Top-K column layout.
+        distribution_mask = mask_estimate.distribution_mask
+
         def _add_tail(lp: torch.Tensor) -> torch.Tensor:
             log_s = torch.logsumexp(lp, dim=-1, keepdim=True).clamp(max=-1e-7)
             tail = torch.log(-torch.expm1(log_s))
@@ -1272,28 +1207,23 @@ def compute_opd_kl(
         if norm_mode == "tail":
             s_t = _add_tail(s)
             t_t = _add_tail(t)
-            effective_mask = (
-                torch.cat([mask, torch.ones_like(mask[..., :1])], dim=-1) if mask is not None else None
-            )
         elif norm_mode == "norm":
             s_t = _norm(s)
             t_t = _norm(t)
-            effective_mask = mask
         else:  # trunc
             s_t = s
             t_t = t
-            effective_mask = mask
 
-        K_orig = effective_mask.size(-1) if effective_mask is not None else s_t.size(-1)
+        K_orig = distribution_mask.size(-1) if distribution_mask is not None else s_t.size(-1)
         if jsd_alpha == 0.0:
-            result = t_t.exp() * (t_t - s_t)
-            if effective_mask is not None:
-                result = result[..., :K_orig].masked_fill(~effective_mask, 0.0)
+            result = s_t.exp() * (s_t - t_t)
+            if distribution_mask is not None:
+                result = result[..., :K_orig].masked_fill(~distribution_mask, 0.0)
             return result.sum(dim=-1)
         if jsd_alpha == 1.0:
-            result = s_t.exp() * (s_t - t_t)
-            if effective_mask is not None:
-                result = result[..., :K_orig].masked_fill(~effective_mask, 0.0)
+            result = t_t.exp() * (t_t - s_t)
+            if distribution_mask is not None:
+                result = result[..., :K_orig].masked_fill(~distribution_mask, 0.0)
             return result.sum(dim=-1)
 
         log_1ma = torch.log(torch.tensor(1.0 - jsd_alpha, device=s_t.device, dtype=s_t.dtype))
@@ -1302,9 +1232,9 @@ def compute_opd_kl(
 
         kl_student = s_t.exp() * (s_t - m_t)
         kl_teacher = t_t.exp() * (t_t - m_t)
-        if effective_mask is not None:
-            kl_student = kl_student[..., :K_orig].masked_fill(~effective_mask, 0.0)
-            kl_teacher = kl_teacher[..., :K_orig].masked_fill(~effective_mask, 0.0)
+        if distribution_mask is not None:
+            kl_student = kl_student[..., :K_orig].masked_fill(~distribution_mask, 0.0)
+            kl_teacher = kl_teacher[..., :K_orig].masked_fill(~distribution_mask, 0.0)
         return (1.0 - jsd_alpha) * kl_student.sum(dim=-1) + jsd_alpha * kl_teacher.sum(dim=-1)
 
     raise ValueError(f"Unknown opd_kl_type: {kl_type}. Choose one of {OPD_KL_TYPES}.")
@@ -1323,12 +1253,18 @@ def compute_opd_kl_topk(
 
     ``mask``: optional bool ``[R, K]`` (union path only). ``None`` for fixed-K
     topk path — behavior unchanged.
+
+    This is the ordinary OPD convention: ``reverse_kl`` maps to the student
+    expectation and ``forward_kl`` maps to the teacher expectation. In
+    particular, ``jsd_alpha=0`` is the reverse-KL endpoint and
+    ``jsd_alpha=1`` is the forward-KL endpoint. SDPO uses a separate criterion
+    because its reference endpoint aliases are intentionally reversed.
     """
     if kl_type in ("reverse_kl", "forward_kl", "jsd"):
         if kl_type == "reverse_kl":
-            alpha = 1.0
-        elif kl_type == "forward_kl":
             alpha = 0.0
+        elif kl_type == "forward_kl":
+            alpha = 1.0
         else:
             alpha = float(jsd_alpha)
         return compute_opd_kl(
@@ -1349,93 +1285,6 @@ def compute_opd_kl_topk(
         mask=mask,
     )
     return per_kl.sum(dim=-1)
-
-
-def compute_sdpo_topk_loss(
-    student_topk_log_probs: torch.Tensor,
-    teacher_topk_log_probs: torch.Tensor,
-    *,
-    kl_type: str,
-    jsd_alpha: float,
-    norm_mode: str = "tail",
-    log_prob_min_clamp: float | None = None,
-    mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Compute the differentiable full-logit SDPO loss on a Top-K support.
-
-    The rollout provides full-vocabulary log-probabilities for the selected
-    token ids, not probabilities renormalized within Top-K. ``tail`` therefore
-    adds the omitted vocabulary mass as one extra bucket, matching the
-    reference SDPO implementation. The student tensor remains differentiable;
-    the teacher tensor is treated as a fixed target.
-
-    ``reverse_kl`` is ``KL(student || teacher)`` and ``forward_kl`` is
-    ``KL(teacher || student)``. For ``jsd``, ``jsd_alpha`` follows the
-    reference convention: 0 is forward KL, 1 is reverse KL, and 0.5 is the
-    symmetric Jensen-Shannon divergence.
-    """
-    s = student_topk_log_probs.float()
-    t = teacher_topk_log_probs.float().detach()
-    if s.shape != t.shape:
-        raise ValueError(f"SDPO Top-K shape mismatch: student={tuple(s.shape)}, teacher={tuple(t.shape)}")
-    if log_prob_min_clamp is not None:
-        s = s.clamp_min(log_prob_min_clamp)
-        t = t.clamp_min(log_prob_min_clamp)
-    if mask is not None:
-        s = s.masked_fill(~mask, float("-inf"))
-        t = t.masked_fill(~mask, float("-inf"))
-
-    def _add_tail(log_probs: torch.Tensor) -> torch.Tensor:
-        log_sum = torch.logsumexp(log_probs, dim=-1, keepdim=True).clamp(max=-1e-7)
-        tail = torch.log(-torch.expm1(log_sum))
-        return torch.cat([log_probs, tail], dim=-1)
-
-    def _renormalize(log_probs: torch.Tensor) -> torch.Tensor:
-        return log_probs - torch.logsumexp(log_probs, dim=-1, keepdim=True)
-
-    if norm_mode == "tail":
-        s_dist = _add_tail(s)
-        t_dist = _add_tail(t)
-        effective_mask = torch.cat([mask, torch.ones_like(mask[..., :1])], dim=-1) if mask is not None else None
-    elif norm_mode == "norm":
-        s_dist = _renormalize(s)
-        t_dist = _renormalize(t)
-        effective_mask = mask
-    elif norm_mode == "trunc":
-        s_dist = s
-        t_dist = t
-        effective_mask = mask
-    else:
-        raise ValueError(f"Unknown SDPO norm mode: {norm_mode}")
-
-    if kl_type == "reverse_kl":
-        loss = s_dist.exp() * (s_dist - t_dist)
-    elif kl_type == "forward_kl":
-        loss = t_dist.exp() * (t_dist - s_dist)
-    elif kl_type == "jsd":
-        if not 0.0 <= jsd_alpha <= 1.0:
-            raise ValueError(f"jsd_alpha must be in [0, 1], got {jsd_alpha}")
-        if jsd_alpha == 0.0:
-            loss = t_dist.exp() * (t_dist - s_dist)
-        elif jsd_alpha == 1.0:
-            loss = s_dist.exp() * (s_dist - t_dist)
-        else:
-            alpha = torch.tensor(jsd_alpha, dtype=s_dist.dtype, device=s_dist.device)
-            mixture = torch.logsumexp(
-                torch.stack(
-                    [s_dist + torch.log1p(-alpha), t_dist + torch.log(alpha)],
-                ),
-                dim=0,
-            )
-            student_kl = s_dist.exp() * (s_dist - mixture)
-            teacher_kl = t_dist.exp() * (t_dist - mixture)
-            loss = (1.0 - jsd_alpha) * student_kl + jsd_alpha * teacher_kl
-    else:
-        raise ValueError(f"Unknown SDPO KL type: {kl_type}")
-
-    if effective_mask is not None:
-        loss = loss.masked_fill(~effective_mask, 0.0)
-    return loss.sum(dim=-1)
 
 
 def _opd_compute_per_token_signal(
@@ -1496,11 +1345,6 @@ def apply_opd_to_advantages(
     log_prob_min_clamp = getattr(args, "opd_log_prob_min_clamp", None)
     token_selection = args.opd_token_selection
     is_topk = token_selection in ("student_topk", "teacher_topk", "union")
-    sdpo_valid = _resolve_sdpo_valid_mask(
-        rollout_data,
-        len(advantages),
-        advantages[0].device if advantages else torch.device("cpu"),
-    )
 
     if is_topk:
         student_topk_lp_list = rollout_data.get("opd_topk_student_log_probs")
@@ -1519,29 +1363,11 @@ def apply_opd_to_advantages(
             if i < len(teacher_topk_lp_list) and isinstance(teacher_topk_lp_list[i], torch.Tensor):
                 t_lp_2d = teacher_topk_lp_list[i].to(device=device)
 
-            if (
-                s_lp_2d is None
-                or t_lp_2d is None
-                or s_lp_2d.numel() == 0
-                or t_lp_2d.numel() == 0
-            ):
-                continue
-            if s_lp_2d.shape != t_lp_2d.shape:
-                raise ValueError(
-                    "OPD top-k shape mismatch after CP/padding alignment: "
-                    f"sample={i}, student={tuple(s_lp_2d.shape)}, teacher={tuple(t_lp_2d.shape)}"
-                )
-
             mask = None
             if k_lengths_list is not None and i < len(k_lengths_list):
                 kl = k_lengths_list[i]
                 if kl is not None and t_lp_2d is not None:
                     kl = kl.to(device=device)
-                    if kl.numel() != t_lp_2d.size(0):
-                        raise ValueError(
-                            "OPD union top-k row count mismatch after CP/padding alignment: "
-                            f"sample={i}, k_lengths={kl.numel()}, rows={t_lp_2d.size(0)}"
-                        )
                     max_kp = t_lp_2d.size(-1)
                     mask = torch.arange(max_kp, device=device).unsqueeze(0) < kl.unsqueeze(1)
 
@@ -1561,8 +1387,6 @@ def apply_opd_to_advantages(
             per_token_clip = getattr(args, "opd_per_token_clip", None)
             if per_token_clip is not None:
                 kl_term = torch.clamp(kl_term, max=float(per_token_clip))
-            if sdpo_valid is not None:
-                kl_term = kl_term * sdpo_valid[i].to(dtype=kl_term.dtype)
             advantages[i] = adv - args.opd_kl_coef * kl_term.detach()
         return
 
@@ -1584,140 +1408,32 @@ def apply_opd_to_advantages(
             norm_mode=norm_mode,
             log_prob_min_clamp=log_prob_min_clamp,
         )
-        if sdpo_valid is not None:
-            kl_term = kl_term * sdpo_valid[i].to(dtype=kl_term.dtype)
         advantages[i] = adv - args.opd_kl_coef * kl_term.detach()
 
 
-def reduce_opd_loss(
-    batch: RolloutBatch,
-    values: torch.Tensor,
-    sample_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Reduce OPD values over effective response tokens.
-
-    ``sample_mask`` is an OPD-only mask.  It excludes invalid SDPO samples
-    from both the numerator and denominator without changing the masks used
-    by the GRPO policy, entropy, or reference-KL terms.
-    """
+def reduce_opd_loss(batch: RolloutBatch, values: torch.Tensor) -> torch.Tensor:
     chunks = torch.split(values, batch["response_lengths"], dim=0)
     masked_chunks = []
-    denominator = values.new_zeros(())
-    if sample_mask is not None and sample_mask.numel() != len(chunks):
-        raise ValueError(f"OPD chunks {len(chunks)} != sample mask {sample_mask.numel()}")
-
-    for index, (chunk, loss_mask) in enumerate(zip(chunks, batch["loss_masks"], strict=True)):
+    for chunk, loss_mask in zip(chunks, batch["loss_masks"], strict=False):
         mask = loss_mask.to(device=chunk.device, dtype=chunk.dtype)
-        if sample_mask is not None:
-            mask = mask * sample_mask[index].to(device=chunk.device, dtype=chunk.dtype)
         masked = chunk * mask
         masked_chunks.append(masked)
-        denominator = denominator + mask.sum()
 
-    if not masked_chunks:
-        return values.sum() * 0.0
     numerator = torch.cat(masked_chunks, dim=0).sum()
+    denominator = sum(mask.to(device=values.device, dtype=values.dtype).sum() for mask in batch["loss_masks"])
     return numerator / torch.clamp_min(denominator, 1)
 
 
-def _get_opd_loss_masks(
-    batch: RolloutBatch,
-    sample_mask: torch.Tensor | None,
-) -> list[torch.Tensor]:
-    """Return loss masks used only by the OPD reducer."""
-
-    if sample_mask is None:
-        return batch["loss_masks"]
-    if sample_mask.numel() != len(batch["loss_masks"]):
-        raise ValueError(
-            f"OPD loss masks {len(batch['loss_masks'])} != sample mask {sample_mask.numel()}"
-        )
-    return [
-        loss_mask
-        * sample_mask[index].to(device=loss_mask.device, dtype=loss_mask.dtype)
-        for index, loss_mask in enumerate(batch["loss_masks"])
-    ]
-
-
-def _resolve_sdpo_valid_mask(
-    batch: RolloutBatch,
-    num_samples: int,
-    device: torch.device,
-) -> torch.Tensor | None:
-    raw_mask = batch.get("sdpo_valid")
-    if raw_mask is None:
-        return None
-    if isinstance(raw_mask, torch.Tensor):
-        mask = raw_mask.reshape(-1).to(device=device, dtype=torch.bool)
-    else:
-        values = []
-        for value in raw_mask:
-            if isinstance(value, torch.Tensor):
-                values.append(value.reshape(()).to(device=device, dtype=torch.bool))
-            else:
-                values.append(torch.tensor(bool(value), device=device, dtype=torch.bool))
-        mask = torch.stack(values) if values else torch.empty(0, device=device, dtype=torch.bool)
-    if mask.numel() != num_samples:
-        raise ValueError(f"sdpo_valid length {mask.numel()} != sample count {num_samples}")
-    return mask
-
-
-def _local_response_lengths(batch: RolloutBatch, args: Namespace) -> list[int]:
-    """Return response lengths represented by the current CP-local tensors."""
-
-    response_lengths = [int(value) for value in batch["response_lengths"]]
-    dynamic_cp_size = batch.get("dynamic_cp_size")
-    from megatron.core import mpu
-
-    cp_size = dynamic_cp_size if dynamic_cp_size is not None else mpu.get_context_parallel_world_size()
-    if cp_size <= 1:
-        return response_lengths
-
-    from relax.backends.megatron.cp_utils import get_logits_and_tokens_offset_with_cp
-
-    dynamic_cp_rank = batch.get("dynamic_cp_rank")
-    max_seq_lens = batch.get("max_seq_lens")
-    padded_total_lengths = batch.get("padded_total_lengths")
-    local_lengths = []
-    for i, (total_length, response_length) in enumerate(zip(batch["total_lengths"], response_lengths, strict=True)):
-        _, _, logits_offsets, _ = get_logits_and_tokens_offset_with_cp(
-            int(total_length),
-            response_length,
-            args.qkv_format,
-            max_seq_lens[i] if max_seq_lens is not None else None,
-            padded_total_lengths[i] if padded_total_lengths is not None else None,
-            dynamic_cp_size=dynamic_cp_size,
-            dynamic_cp_rank=dynamic_cp_rank,
-        )
-        local_lengths.append(sum(end - start for start, end in logits_offsets))
-    return local_lengths
-
-
-def _context_parallel_size(batch: RolloutBatch) -> int:
+def _opd_context_parallel_size(args: Namespace, batch: RolloutBatch) -> int:
     dynamic_cp_size = batch.get("dynamic_cp_size")
     if dynamic_cp_size is not None:
         return int(dynamic_cp_size)
-    from megatron.core import mpu
+    try:
+        from megatron.core import mpu
 
-    return int(mpu.get_context_parallel_world_size())
-
-
-def _mask_opd_values_by_sample(
-    values: torch.Tensor,
-    batch: RolloutBatch,
-    args: Namespace,
-    sample_mask: torch.Tensor | None,
-) -> torch.Tensor:
-    if sample_mask is None:
-        return values
-    local_lengths = _local_response_lengths(batch, args)
-    chunks = torch.split(values, local_lengths, dim=0)
-    if len(chunks) != sample_mask.numel():
-        raise ValueError(f"OPD local chunks {len(chunks)} != sdpo_valid samples {sample_mask.numel()}")
-    return torch.cat(
-        [chunk * sample_mask[i].to(dtype=values.dtype) for i, chunk in enumerate(chunks)],
-        dim=0,
-    )
+        return int(mpu.get_context_parallel_world_size())
+    except (ImportError, RuntimeError):
+        return int(getattr(args, "context_parallel_size", 1))
 
 
 def compute_policy_opd_loss(
@@ -1739,106 +1455,31 @@ def compute_policy_opd_loss(
     opd_log_prob_min_clamp = getattr(args, "opd_log_prob_min_clamp", None)
     token_selection = args.opd_token_selection
     is_topk = token_selection in ("student_topk", "teacher_topk", "union")
-    sample_mask = _resolve_sdpo_valid_mask(batch, len(batch["response_lengths"]), log_probs.device)
-
-    def empty_sdpo_loss() -> tuple[torch.Tensor | None, dict[str, torch.Tensor]]:
-        if sample_mask is None:
-            return None, {}
-        zero = log_probs.sum() * 0.0
-        return zero, {
-            "sdpo_valid_ratio": sample_mask.float().mean().detach(),
-            "opd_kl": zero.detach(),
-        }
 
     student_topk_lp_list = log_probs_and_entropy.get("topk_log_probs")
     teacher_topk_lp_list = batch.get("opd_topk_teacher_log_probs")
 
     if is_topk:
-        if student_topk_lp_list is None or teacher_topk_lp_list is None:
-            return empty_sdpo_loss()
-        sample_count = len(batch["response_lengths"])
-        if len(student_topk_lp_list) != sample_count or len(teacher_topk_lp_list) != sample_count:
-            raise ValueError(
-                "OPD top-k sample count mismatch: "
-                f"student={len(student_topk_lp_list)}, teacher={len(teacher_topk_lp_list)}, expected={sample_count}"
-            )
+        if not (student_topk_lp_list and teacher_topk_lp_list):
+            return None, {}
         # union: each sample has a different K' (union of student/teacher top-K),
         # so we cannot torch.cat the per-sample [R_i, K'_i] along dim=0.
         # Compute per-sample KL (returns 1D [R_i]) then cat the 1D results.
         k_lengths_list = batch.get("opd_topk_ksz") if token_selection == "union" else None
         device = log_probs.device
-        local_response_lengths = _local_response_lengths(batch, args)
-        if len(local_response_lengths) != sample_count:
-            raise ValueError(
-                "OPD local response length count mismatch: "
-                f"local={len(local_response_lengths)}, expected={sample_count}"
-            )
-        expected_total_rows = sum(local_response_lengths)
-        if expected_total_rows != log_probs.numel():
-            raise ValueError(
-                "OPD student log-prob length mismatch after CP/padding alignment: "
-                f"student={log_probs.numel()}, expected={expected_total_rows}"
-            )
         per_token_kl_chunks: list[torch.Tensor] = []
         for i, s_lp_2d in enumerate(student_topk_lp_list):
-            expected_rows = local_response_lengths[i]
-            if s_lp_2d is None:
-                per_token_kl_chunks.append(torch.zeros(expected_rows, device=device, dtype=log_probs.dtype))
-                continue
+            t_lp_2d = teacher_topk_lp_list[i].to(device=device).detach()
             s_lp_2d = s_lp_2d.to(device=device)
-            if s_lp_2d.ndim != 2:
-                raise ValueError(
-                    "OPD student top-k rank mismatch after CP/padding alignment: "
-                    f"sample={i}, shape={tuple(s_lp_2d.shape)}"
-                )
-            if s_lp_2d.numel() == 0:
-                per_token_kl_chunks.append(torch.zeros(expected_rows, device=device, dtype=log_probs.dtype))
-                continue
-            if s_lp_2d.size(0) != expected_rows:
-                raise ValueError(
-                    "OPD student top-k row mismatch after CP/padding alignment: "
-                    f"sample={i}, rows={s_lp_2d.size(0)}, expected={expected_rows}"
-                )
-            t_lp_raw = teacher_topk_lp_list[i]
-            if t_lp_raw is None:
-                # A failed teacher request must not corrupt the policy loss. The
-                # sample's GRPO term remains active; this sample contributes no
-                # OPD term until a teacher payload exists.
-                per_token_kl_chunks.append(torch.zeros(expected_rows, device=device, dtype=log_probs.dtype))
-                continue
-            t_lp_2d = t_lp_raw.to(device=device).detach()
-            if t_lp_2d.ndim != 2:
-                raise ValueError(
-                    "OPD teacher top-k rank mismatch after CP/padding alignment: "
-                    f"sample={i}, shape={tuple(t_lp_2d.shape)}"
-                )
-            if t_lp_2d.numel() == 0:
-                per_token_kl_chunks.append(torch.zeros(expected_rows, device=device, dtype=log_probs.dtype))
-                continue
-            if t_lp_2d.size(0) != expected_rows:
-                raise ValueError(
-                    "OPD teacher top-k row mismatch after CP/padding alignment: "
-                    f"sample={i}, rows={t_lp_2d.size(0)}, expected={expected_rows}"
-                )
-            if s_lp_2d.shape != t_lp_2d.shape:
-                raise ValueError(
-                    "OPD top-k shape mismatch after CP/padding alignment: "
-                    f"sample={i}, student={tuple(s_lp_2d.shape)}, teacher={tuple(t_lp_2d.shape)}"
-                )
             mask = None
             if k_lengths_list is not None and i < len(k_lengths_list):
                 kl = k_lengths_list[i]
                 if kl is not None and t_lp_2d is not None:
                     kl = kl.to(device=device)
-                    if kl.numel() != t_lp_2d.size(0):
-                        raise ValueError(
-                            "OPD union top-k row count mismatch after CP/padding alignment: "
-                            f"sample={i}, k_lengths={kl.numel()}, rows={t_lp_2d.size(0)}"
-                        )
                     max_kp = t_lp_2d.size(-1)
                     mask = torch.arange(max_kp, device=device).unsqueeze(0) < kl.unsqueeze(1)
             per_token_kl_chunks.append(
-                compute_sdpo_topk_loss(
+                compute_opd_kl_topk(
                     s_lp_2d,
                     t_lp_2d,
                     kl_type=opd_kl_type,
@@ -1848,44 +1489,21 @@ def compute_policy_opd_loss(
                     mask=mask,
                 )
             )
-        if not per_token_kl_chunks:
-            return empty_sdpo_loss()
         opd_per_token_kl = torch.cat(per_token_kl_chunks, dim=0).to(dtype=log_probs.dtype)
     else:
         if "teacher_log_probs" not in batch or batch["teacher_log_probs"] is None:
-            return empty_sdpo_loss()
-        if len(batch["teacher_log_probs"]) != len(batch["response_lengths"]):
-            raise ValueError(
-                "OPD sampled-token sample count mismatch: "
-                f"teacher={len(batch['teacher_log_probs'])}, expected={len(batch['response_lengths'])}"
-            )
-        if any(value is None for value in batch["teacher_log_probs"]):
-            return empty_sdpo_loss()
+            return None, {}
         teacher_log_probs_loss = (
             torch.cat(batch["teacher_log_probs"], dim=0).to(device=log_probs.device, dtype=log_probs.dtype).detach()
         )
-        if teacher_log_probs_loss.numel() != log_probs.numel():
-            raise ValueError(
-                "OPD sampled-token length mismatch after CP/padding alignment: "
-                f"teacher={teacher_log_probs_loss.numel()}, student={log_probs.numel()}"
-            )
-        if opd_kl_type == "reverse_kl":
-            # The non-full-logit reference path uses the sampled response
-            # token as an on-policy score-function target. Detaching the
-            # log-ratio keeps the teacher target fixed while retaining the
-            # student log-probability gradient.
-            opd_per_token_kl = (
-                (log_probs.detach() - teacher_log_probs_loss) * log_probs
-            ).to(dtype=log_probs.dtype)
-        else:
-            opd_per_token_kl = compute_opd_kl(
-                log_probs,
-                teacher_log_probs_loss,
-                kl_type=opd_kl_type,
-                jsd_alpha=opd_jsd_alpha,
-                norm_mode=opd_norm_mode,
-                log_prob_min_clamp=opd_log_prob_min_clamp,
-            ).to(dtype=log_probs.dtype)
+        opd_per_token_kl = compute_opd_kl(
+            log_probs,
+            teacher_log_probs_loss,
+            kl_type=opd_kl_type,
+            jsd_alpha=opd_jsd_alpha,
+            norm_mode=opd_norm_mode,
+            log_prob_min_clamp=opd_log_prob_min_clamp,
+        ).to(dtype=log_probs.dtype)
 
     reported_loss: dict[str, torch.Tensor] = {}
     per_token_clip = getattr(args, "opd_per_token_clip", None)
@@ -1905,23 +1523,15 @@ def compute_policy_opd_loss(
         with torch.no_grad():
             reported_loss["opd_is_clip_frac"] = (ratio > clip).float().mean().clone().detach()
 
-    opd_per_token_kl = _mask_opd_values_by_sample(opd_per_token_kl, batch, args, sample_mask)
-
-    # The reducer choice must be identical on every CP rank.  Local response
-    # lengths are intentionally used only for slicing/row alignment; using
-    # them as a branch condition can make one rank return a token sum while
-    # another returns an already-normalized mean.
-    uses_cp_local_layout = _context_parallel_size(batch) > 1
-    if uses_cp_local_layout:
-        if sample_mask is None and sum_of_sample_mean is not None:
-            opd_reducer = sum_of_sample_mean
-        else:
+    opd_reducer = sum_of_sample_mean
+    if _opd_context_parallel_size(args, batch) > 1:
+        if opd_reducer is None:
             from relax.backends.megatron.cp_utils import get_sum_of_sample_mean
 
             opd_reducer = get_sum_of_sample_mean(
                 batch["total_lengths"],
                 batch["response_lengths"],
-                _get_opd_loss_masks(batch, sample_mask),
+                batch["loss_masks"],
                 getattr(args, "calculate_per_token_loss", False),
                 args.qkv_format,
                 batch.get("max_seq_lens"),
@@ -1929,16 +1539,7 @@ def compute_policy_opd_loss(
                 dynamic_cp_size=batch.get("dynamic_cp_size"),
                 dynamic_cp_rank=batch.get("dynamic_cp_rank"),
             )
-        opd_loss = opd_reducer(opd_per_token_kl)
-        opd_metric = opd_reducer(opd_per_token_kl.detach())
-    else:
-        opd_loss = reduce_opd_loss(batch, opd_per_token_kl, sample_mask)
-        opd_metric = reduce_opd_loss(batch, opd_per_token_kl.detach(), sample_mask)
-
-    with torch.no_grad():
-        if sample_mask is not None:
-            reported_loss["sdpo_valid_ratio"] = sample_mask.float().mean()
-        reported_loss["opd_kl"] = opd_metric
+    opd_loss = opd_reducer(opd_per_token_kl) if opd_reducer is not None else reduce_opd_loss(batch, opd_per_token_kl)
     return opd_loss_coef * opd_loss, reported_loss
 
 

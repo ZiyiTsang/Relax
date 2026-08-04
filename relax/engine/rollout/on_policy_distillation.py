@@ -9,8 +9,9 @@ import aiohttp
 import numpy as np
 
 from relax.utils.logging_utils import get_logger
-from relax.utils.opd import opd_main_worker, opd_opsd_worker
-from relax.utils.opd.sdpo import SDPO_TOKEN_SELECTION, SDPO_VALID_FIELD
+from relax.utils.opd import opd_main_worker
+from relax.utils.opd.sdpo import SDPO_TOKEN_SELECTION, validate_sdpo_text_only
+from relax.utils.opd.teacher_prefill_builder import TeacherPrefillBuilder
 from relax.utils.types import Sample
 
 
@@ -28,6 +29,14 @@ except ImportError:  # pragma: no cover - orjson is normally available via sglan
 logger = get_logger(__name__)
 
 EncodeMultimodalInputs = Callable[[dict], Awaitable[tuple[dict, float]]]
+
+
+def _has_sdpo_teacher_prompt(prompt: object) -> bool:
+    if isinstance(prompt, str):
+        return bool(prompt.strip())
+    if isinstance(prompt, list):
+        return bool(prompt)
+    return False
 
 
 def _aiohttp_json_post_kwargs(payload: dict) -> dict:
@@ -97,9 +106,10 @@ def _pick_teacher_url(args, sample=None) -> str:
 class OpdManager:
     def __init__(self, args):
         self.args = args
+        self.is_sdpo = getattr(args, "opd_loss_mode", "opd") == "sdpo"
         self.topk_worker: opd_main_worker.TopkWorker | None = None
         self.sampled_worker: opd_main_worker.SampledTokenWorker | None = None  # 仅 student_sampled
-        self.opsd_worker: opd_opsd_worker.OpsdWorker | None = None
+        self.teacher_prefill_builder = TeacherPrefillBuilder.from_args(args)
 
         token_selection = args.opd_token_selection
         if token_selection != "student_sampled":
@@ -107,31 +117,18 @@ class OpdManager:
         else:
             self.sampled_worker = opd_main_worker.SampledTokenWorker.from_args(args)
 
-        opsd_worker = opd_opsd_worker.OpsdWorker.from_args(args)
-        self.opsd_worker = opsd_worker if opsd_worker.is_opsd else None
-
     @property
     def is_topk(self) -> bool:
         return self.topk_worker is not None
 
-    @property
-    def is_opsd(self) -> bool:
-        return self.opsd_worker is not None
-
-    def _validate_sdpo_configuration(self, samples: list[Sample]) -> list[Sample]:
-        sdpo_samples = [sample for sample in samples if (sample.metadata or {}).get("sdpo", False)]
-        if not sdpo_samples:
-            return []
-        if self.opsd_worker is None:
-            raise ValueError(
-                "SDPO samples require --opd-teacher-prompt-key so the dynamic teacher prompt path is enabled."
-            )
+    def _validate_sdpo_configuration(self) -> None:
+        if not self.is_sdpo:
+            return
         if self.topk_worker is None or self.topk_worker.spec.name != SDPO_TOKEN_SELECTION:
             raise ValueError(
                 "SDPO only supports student_topk token selection; "
                 "set --opd-token-selection student_topk and --opd-log-prob-top-k > 0."
             )
-        return sdpo_samples
 
     def schema_opd_transfer_data(self) -> list[str]:
         fields: list[str] = []
@@ -139,13 +136,34 @@ class OpdManager:
             fields.extend(self.topk_worker.topk_transfer_fields())
         if self.sampled_worker is not None:
             fields.extend(self.sampled_worker.sampled_transfer_fields())
-        if self.opsd_worker is not None:
-            fields.append(SDPO_VALID_FIELD)
         return fields
+
+    @staticmethod
+    def _clear_teacher_payload(sample: Sample) -> None:
+        """Drop outputs from an earlier teacher request without touching
+        rollout Top-K."""
+
+        for field_name in (
+            "teacher_log_probs",
+            "teacher_topk_token_ids",
+            "teacher_topk_log_probs",
+            "teacher_at_student_topk_log_probs",
+            "student_at_teacher_topk_log_probs",
+            "opd_topk_token_ids",
+            "opd_topk_student_log_probs",
+            "opd_topk_teacher_log_probs",
+            "opd_topk_ksz",
+            "teacher_tokens",
+            "teacher_prompt_length",
+        ):
+            setattr(sample, field_name, None)
 
     def produce_opd_transfer_data(self, samples: list[Sample], train_data: dict) -> None:
         if self.topk_worker is not None:
-            for field_name in opd_main_worker.TopkWorker.TRANSFER_FIELDS:
+            transfer_fields = (
+                self.topk_worker.topk_transfer_fields() if self.is_sdpo else opd_main_worker.TopkWorker.TRANSFER_FIELDS
+            )
+            for field_name in transfer_fields:
                 if not any(getattr(s, field_name, None) is not None for s in samples):
                     continue
                 flat: list = []
@@ -166,11 +184,6 @@ class OpdManager:
                 s.teacher_log_probs if s.teacher_log_probs is not None else [] for s in samples
             ]
 
-        if self.opsd_worker is not None:
-            train_data[SDPO_VALID_FIELD] = [
-                True if s.sdpo_valid is None else bool(s.sdpo_valid) for s in samples
-            ]
-
     def before_rollout(self, payload: dict) -> None:
         if self.topk_worker is None:
             return
@@ -185,7 +198,11 @@ class OpdManager:
         if val_b64 is None:
             return tokens, log_probs
         import numpy as np
-        import pybase64
+
+        try:
+            import pybase64
+        except ImportError:  # pragma: no cover - pybase64 is used in the runtime image
+            import base64 as pybase64
 
         val = np.frombuffer(pybase64.b64decode(val_b64), dtype=np.float32)
         idx_b64 = meta_info.get("output_token_logprobs_idx_b64")
@@ -219,43 +236,82 @@ class OpdManager:
         encode_multimodal_inputs: EncodeMultimodalInputs | None = None,
     ) -> None:
         sample_list = list(samples) if isinstance(samples, Sequence) else [samples]
-        sdpo_samples = self._validate_sdpo_configuration(sample_list)
+        self._validate_sdpo_configuration()
+        if self.is_sdpo:
+            for sample in sample_list:
+                validate_sdpo_text_only(sample)
+            for sample in sample_list:
+                self._clear_teacher_payload(sample)
 
-        if self.opsd_worker is not None:
-            if sdpo_samples:
-                from relax.utils.opd.sdpo import prepare_sdpo_teacher_prompts
+        prompt_stats = None
+        if self.is_sdpo:
+            from relax.utils.opd.sdpo import prepare_sdpo_teacher_prompts
 
-                prompt_stats = prepare_sdpo_teacher_prompts(
-                    sample_list,
-                    reward_key=getattr(self.args, "reward_key", None),
-                )
-                logger.info(
-                    "SDPO teacher prompt routing: valid=%d/%d feedback=%d used=%d successful_demo=%d",
-                    prompt_stats.valid_samples,
-                    prompt_stats.total_samples,
-                    prompt_stats.feedback_available,
-                    prompt_stats.feedback_used,
-                    prompt_stats.successful_demonstrations,
-                )
-            await asyncio.gather(*[self.opsd_worker.build_teacher_inputs(self.args, s) for s in sample_list])
+            prompt_stats = prepare_sdpo_teacher_prompts(
+                sample_list,
+                reward_key=getattr(self.args, "reward_key", None),
+            )
+            prompt_metrics = prompt_stats.as_dict()
+            logger.info(
+                "SDPO teacher prompt routing: valid=%d/%d context_ratio=%.4f "
+                "feedback_ratio=%.4f used_ratio=%.4f feedback=%d used=%d successful_demo=%d",
+                prompt_stats.valid_samples,
+                prompt_stats.total_samples,
+                prompt_metrics["valid_teacher_context_ratio"],
+                prompt_metrics["feedback_available_ratio"],
+                prompt_metrics["feedback_used_ratio"],
+                prompt_stats.feedback_available,
+                prompt_stats.feedback_used,
+                prompt_stats.successful_demonstrations,
+            )
+        await asyncio.gather(*[self.teacher_prefill_builder.prepare(self.args, sample) for sample in sample_list])
 
         prefill_start = monotonic()
-        async with _create_teacher_client_session(self.args) as session:
-            fetch_results = await asyncio.gather(*[self._teacher_prefill(s, session) for s in sample_list])
-            self._raise_if_all_failed(sample_list, fetch_results)
-
-            if self.topk_worker is not None and self.topk_worker.spec.student_at_teacher:
-                await asyncio.gather(
-                    *[self._student_prefill(s, session, encode_multimodal_inputs) for s in sample_list]
+        if self.is_sdpo:
+            request_indices = [i for i, sample in enumerate(sample_list) if self._needs_teacher_request(sample)]
+        else:
+            request_indices = list(range(len(sample_list)))
+        fetch_results: list[bool | None] = [None] * len(sample_list)
+        if request_indices:
+            async with _create_teacher_client_session(self.args) as session:
+                requested_results = await asyncio.gather(
+                    *[self._teacher_prefill(sample_list[i], session) for i in request_indices]
+                )
+                for index, result in zip(request_indices, requested_results, strict=True):
+                    fetch_results[index] = result
+                self._raise_if_all_failed(
+                    [sample_list[i] for i in request_indices],
+                    requested_results,
                 )
 
+                if self.topk_worker is not None and self.topk_worker.spec.student_at_teacher:
+                    await asyncio.gather(
+                        *[
+                            self._student_prefill(sample_list[i], session, encode_multimodal_inputs)
+                            for i in request_indices
+                        ]
+                    )
+
         self._assemble_transfer(sample_list)
-        if any((s.metadata or {}).get("sdpo", False) for s in sample_list):
+        if self.is_sdpo:
             logger.info(
-                "SDPO teacher prefill: requests=%d elapsed=%.3fs",
-                sum(int(int(s.response_length or 0) > 0) for s in sample_list),
+                "SDPO teacher prefill: requests=%d valid=%d elapsed=%.3fs",
+                len(request_indices),
+                sum(int(result is True) for result in fetch_results),
                 monotonic() - prefill_start,
             )
+
+    def _needs_teacher_request(self, sample: Sample) -> bool:
+        response_length = int(sample.response_length or 0)
+        if self.is_sdpo and response_length <= 0:
+            raise ValueError(f"SDPO requires a non-empty response; sample_index={getattr(sample, 'index', None)}")
+        if response_length <= 0:
+            return False
+        if self.is_sdpo and not _has_sdpo_teacher_prompt(sample.teacher_prompt):
+            raise ValueError(
+                f"SDPO requires a teacher prompt for every non-empty response; sample_index={sample.index}"
+            )
+        return True
 
     async def _post_logprob(
         self,
@@ -279,30 +335,36 @@ class OpdManager:
                 getattr(sample, "index", None),
                 f"{type(exc).__name__}: {str(exc)[:256]}",
             )
+            if self.is_sdpo:
+                raise RuntimeError(f"SDPO {err_tag} failed for sample_index={getattr(sample, 'index', None)}") from exc
             return None
 
         return opd_main_worker.LogprobResponse(data)
 
     async def _teacher_prefill(self, sample: Sample, session: aiohttp.ClientSession) -> bool:
-        from relax.utils.opd.opd_utils import build_teacher_preexpanded_image_data
-
         response_length = int(sample.response_length or 0)
         if response_length <= 0:
             return True
+        if self.is_sdpo and not _has_sdpo_teacher_prompt(sample.teacher_prompt):
+            raise ValueError(
+                f"SDPO requires a teacher prompt for every non-empty response; sample_index={sample.index}"
+            )
 
-        # OPSD: expanded teacher_tokens + image_data；
-        if self.opsd_worker is not None:
-            image_data = await build_teacher_preexpanded_image_data(sample)
-            teacher_input_ids = self.opsd_worker.teacher_input_ids(sample, response_length)
-            prompt_length = self.opsd_worker.teacher_prompt_len(sample, response_length)
-        else:
-            image_data = None
-            teacher_input_ids = sample.rollout_tokens or sample.tokens
-            prompt_length = len(sample.tokens) - response_length
-        logprob_start_len = max(prompt_length - 1, 0)
+        teacher_inputs = await self.teacher_prefill_builder.build(sample, response_length)
+        teacher_input_ids = teacher_inputs.input_ids
+        logprob_start_len = teacher_inputs.logprob_start_len
 
-        mm_fields = {"image_data": image_data} if image_data is not None else None
+        mm_fields = {"image_data": teacher_inputs.image_data} if teacher_inputs.image_data is not None else None
         if self.topk_worker is not None:
+            if self.is_sdpo:
+                from relax.utils.opd.sdpo import validate_sdpo_student_topk_ids
+
+                validate_sdpo_student_topk_ids(
+                    token_ids=sample.student_topk_token_ids,
+                    response_rows=response_length,
+                    top_k=self.topk_worker.top_k,
+                    sample_index=int(sample.index) if sample.index is not None else -1,
+                )
             payload = self.topk_worker.build_teacher_payload(
                 input_ids=teacher_input_ids,
                 logprob_start_len=logprob_start_len,
@@ -318,6 +380,8 @@ class OpdManager:
         teacher_url = _pick_teacher_url(self.args, sample)
         resp_obj = await self._post_logprob(session, teacher_url, payload, sample, "teacher prefill")
         if resp_obj is None:
+            if self.is_sdpo:
+                raise RuntimeError(f"SDPO teacher response is empty for sample_index={getattr(sample, 'index', None)}")
             return False
 
         token_logprobs = resp_obj.base_logprobs_1d()
@@ -326,6 +390,11 @@ class OpdManager:
                 "Invalid OPD teacher response for sample_index=%s: missing input_token_logprobs.",
                 getattr(sample, "index", None),
             )
+            if self.is_sdpo:
+                raise ValueError(
+                    "SDPO teacher response is missing input_token_logprobs for "
+                    f"sample_index={getattr(sample, 'index', None)}"
+                )
             return False
 
         if len(token_logprobs) != response_length + 1:
@@ -335,6 +404,12 @@ class OpdManager:
                 len(token_logprobs) - 1,
                 response_length,
             )
+            if self.is_sdpo:
+                raise ValueError(
+                    "SDPO teacher log-prob length mismatch for "
+                    f"sample_index={getattr(sample, 'index', None)}: "
+                    f"got={len(token_logprobs) - 1}, expected={response_length}"
+                )
             return False
 
         if self.sampled_worker is not None:
@@ -349,6 +424,11 @@ class OpdManager:
                 sample.teacher_at_student_topk_log_probs = self.topk_worker.parse_prefill_other_topk(
                     resp_obj, response_length
                 )
+                if self.is_sdpo and sample.teacher_at_student_topk_log_probs is None:
+                    raise ValueError(
+                        "SDPO teacher-on-student Top-K payload is missing for "
+                        f"sample_index={getattr(sample, 'index', None)}"
+                    )
 
         return True
 
@@ -385,8 +465,16 @@ class OpdManager:
         student_url = f"http://{self.args.sglang_router_ip}:{self.args.sglang_router_port}/generate"
         resp_obj = await self._post_logprob(session, student_url, payload, sample, "student-at-teacher-topk")
         if resp_obj is None:
+            if self.is_sdpo:
+                raise RuntimeError(
+                    f"SDPO student-at-teacher-topk response is empty for sample_index={getattr(sample, 'index', None)}"
+                )
             return
         sample.student_at_teacher_topk_log_probs = self.topk_worker.parse_prefill_other_topk(resp_obj, response_length)
+        if self.is_sdpo and sample.student_at_teacher_topk_log_probs is None:
+            raise ValueError(
+                f"SDPO student-at-teacher-topk payload is missing for sample_index={getattr(sample, 'index', None)}"
+            )
 
     def _assemble_transfer(self, samples: list[Sample]) -> None:
         if self.topk_worker is None:
@@ -408,6 +496,16 @@ class OpdManager:
                 teacher_at_student_lp=sample.teacher_at_student_topk_log_probs,
                 student_at_teacher_lp=sample.student_at_teacher_topk_log_probs,
             )
+            if self.is_sdpo and int(sample.response_length or 0) > 0:
+                from relax.utils.opd.sdpo import validate_sdpo_topk_payload
+
+                validate_sdpo_topk_payload(
+                    token_ids=channels.get(opd_main_worker.TopkWorker.TRANSFER_TOKEN_IDS),
+                    teacher_log_probs=channels.get(opd_main_worker.TopkWorker.TRANSFER_TEACHER_LOG_PROBS),
+                    response_rows=int(sample.response_length),
+                    top_k=self.topk_worker.top_k,
+                    sample_index=int(sample.index) if sample.index is not None else -1,
+                )
             sample.opd_topk_token_ids = channels.get(opd_main_worker.TopkWorker.TRANSFER_TOKEN_IDS)
             sample.opd_topk_student_log_probs = channels.get(opd_main_worker.TopkWorker.TRANSFER_STUDENT_LOG_PROBS)
             sample.opd_topk_teacher_log_probs = channels.get(opd_main_worker.TopkWorker.TRANSFER_TEACHER_LOG_PROBS)

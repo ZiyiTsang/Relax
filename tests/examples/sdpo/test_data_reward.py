@@ -2,8 +2,10 @@
 
 from types import SimpleNamespace
 
-from examples.sdpo.prepare_data import normalize_rows
-from examples.sdpo.reward import score
+import pytest
+
+from examples.on_policy_distillation.sdpo.prepare_data import normalize_rows
+from examples.on_policy_distillation.sdpo.reward import score
 
 
 def _sample(metadata: dict, response: str) -> SimpleNamespace:
@@ -35,6 +37,11 @@ def test_normalize_sciknoweval_filters_l3_domains_and_preserves_split() -> None:
     assert len(normalized) == 1
     assert normalized[0]["metadata"]["source_split"] == "train"
     assert normalized[0]["metadata"]["domain"] == "Physics"
+
+
+def test_normalize_rows_rejects_unknown_split() -> None:
+    with pytest.raises(ValueError, match="expected 'train' or 'test'"):
+        normalize_rows("sciknoweval", [], source_split="validation")
 
 
 def test_normalize_sciknoweval_accepts_reference_flat_domain_format() -> None:
@@ -70,6 +77,45 @@ def test_toolalpaca_reward_accepts_canonical_action_input() -> None:
 
     assert result["score"] == 1.0
     assert result["feedback"] == ""
+
+
+def test_toolalpaca_reward_parses_nested_action_input_json() -> None:
+    sample = _sample(
+        {
+            "data_source": "toolalpaca",
+            "golden_answer": [
+                {
+                    "Action": "sendHttpRequest",
+                    "Action_Input": (
+                        '{"method": "POST", "data": {"name": "John Doe", "email": "john.doe@example.com"}}'
+                    ),
+                }
+            ],
+        },
+        (
+            "Action: sendHttpRequest\nAction Input: "
+            '{"method": "POST", "data": '
+            '{"name": "John Doe", "email": "john.doe@example.com"}}'
+        ),
+    )
+
+    result = score(None, sample)
+
+    assert result["score"] == 1.0
+    assert result["feedback"] == ""
+
+
+def test_toolalpaca_reward_accepts_action_names_with_spaces_and_brackets() -> None:
+    for action in ("Get Task", "Search Twitch", "[Optional]updateUserProfile"):
+        sample = _sample(
+            {
+                "data_source": "toolalpaca",
+                "golden_answer": [{"Action": action, "Action_Input": "{}"}],
+            },
+            f"Action: {action}\nAction Input: {{}}",
+        )
+
+        assert score(None, sample)["score"] == 1.0
 
 
 def test_reference_tooluse_row_is_normalized_for_the_same_reward() -> None:

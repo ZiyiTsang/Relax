@@ -1014,14 +1014,26 @@ def policy_loss_function(
 
         loss = loss + args.kl_loss_coef * kl_loss
 
-    opd_loss, opd_reported_loss = compute_policy_opd_loss(
-        args=args,
-        batch=batch,
-        log_probs=log_probs,
-        old_log_probs=old_log_probs,
-        log_probs_and_entropy=log_probs_and_entropy,
-        sum_of_sample_mean=sum_of_sample_mean,
-    )
+    if getattr(args, "opd_loss_mode", "opd") == "sdpo":
+        from relax.utils.opd.sdpo.loss import compute_sdpo_loss
+
+        opd_loss, opd_reported_loss = compute_sdpo_loss(
+            args=args,
+            batch=batch,
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            log_probs_and_entropy=log_probs_and_entropy,
+            sum_of_sample_mean=sum_of_sample_mean,
+        )
+    else:
+        opd_loss, opd_reported_loss = compute_policy_opd_loss(
+            args=args,
+            batch=batch,
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            log_probs_and_entropy=log_probs_and_entropy,
+            sum_of_sample_mean=sum_of_sample_mean,
+        )
     if opd_loss is not None:
         loss = loss + opd_loss
 
@@ -1226,6 +1238,24 @@ def sft_loss_function_chunked(
     return loss, {"loss": loss.clone().detach()}
 
 
+def _get_loss_num_tokens(
+    batch: RolloutBatch,
+    args: Namespace,
+) -> torch.Tensor:
+    """Return the CP-local count for the original response loss mask."""
+
+    return get_cp_local_num_tokens(
+        batch["total_lengths"],
+        batch["response_lengths"],
+        batch["loss_masks"],
+        args.qkv_format,
+        batch.get("max_seq_lens", None),
+        batch.get("padded_total_lengths", None),
+        dynamic_cp_size=batch.get("dynamic_cp_size", None),
+        dynamic_cp_rank=batch.get("dynamic_cp_rank", None),
+    )
+
+
 def loss_function(
     args: Namespace,
     batch: RolloutBatch,
@@ -1269,16 +1299,7 @@ def loss_function(
     # normalizer is correct even when CP differs across micro-batches (dynamic CP).
     # Under static CP it equals the old full-sample count distributed across ranks,
     # so the final loss/grad/metric are unchanged after all-reduce.
-    num_tokens = get_cp_local_num_tokens(
-        batch["total_lengths"],
-        batch["response_lengths"],
-        batch["loss_masks"],
-        args.qkv_format,
-        batch.get("max_seq_lens", None),
-        batch.get("padded_total_lengths", None),
-        dynamic_cp_size=batch.get("dynamic_cp_size", None),
-        dynamic_cp_rank=batch.get("dynamic_cp_rank", None),
-    )
+    num_tokens = _get_loss_num_tokens(batch, args)
     num_samples = len(batch["response_lengths"])
 
     sum_of_sample_mean = get_sum_of_sample_mean(
@@ -1367,22 +1388,69 @@ def loss_function(
         # full-count denominator, leaving the final loss/grad unchanged.
 
     effective_num_tokens = torch.zeros_like(num_tokens) if is_dummy else num_tokens
-    log_values = torch.tensor(
-        [
-            num_samples if not args.calculate_per_token_loss else effective_num_tokens,
-        ]
-        + list(log.values()),
-        device=logits.device,
+    if getattr(args, "opd_loss_mode", "opd") == "sdpo":
+        denominator_overrides = {
+            "sdpo_topk_coverage": log.pop("__sdpo_topk_coverage_denominator", None),
+            "opd_kl": log.pop("__sdpo_opd_kl_denominator", None),
+        }
+    else:
+        denominator_overrides = {}
+    if not any(value is not None for value in denominator_overrides.values()):
+        log_values = torch.tensor(
+            [
+                num_samples if not args.calculate_per_token_loss else effective_num_tokens,
+            ]
+            + list(log.values()),
+            device=logits.device,
+        )
+        if is_dummy:
+            log_values = torch.zeros_like(log_values)
+        return (
+            loss,
+            (effective_num_tokens if args.calculate_per_token_loss else torch.tensor(1, device=logits.device)),
+            {
+                "keys": list(log.keys()),
+                "values": log_values,
+            },
+        )
+    metric_keys = list(log.keys())
+    metric_values: list[torch.Tensor] = []
+    metric_denominators: list[torch.Tensor] = []
+    for key in metric_keys:
+        value = torch.as_tensor(log[key], device=logits.device)
+        override = denominator_overrides.get(key)
+        if override is None:
+            metric_values.append(value)
+            metric_denominators.append(value.new_full((), -1.0))
+        else:
+            override = torch.as_tensor(override, device=logits.device, dtype=value.dtype)
+            metric_values.append(value * override)
+            metric_denominators.append(override)
+
+    metric_count = (
+        effective_num_tokens.to(device=logits.device, dtype=logits.dtype)
+        if args.calculate_per_token_loss
+        else torch.tensor(0 if is_dummy else num_samples, device=logits.device, dtype=logits.dtype)
+    )
+    log_values = torch.cat(
+        [metric_count.reshape(1), torch.stack(metric_values)] if metric_values else [metric_count.reshape(1)]
+    )
+    metric_denominator_values = (
+        torch.stack(metric_denominators)
+        if metric_denominators
+        else torch.empty(0, device=logits.device, dtype=logits.dtype)
     )
     if is_dummy:
         # Drop this mb's contribution from logged metric averages.
         log_values = torch.zeros_like(log_values)
+        metric_denominator_values = torch.zeros_like(metric_denominator_values)
 
     return (
         loss,
         (effective_num_tokens if args.calculate_per_token_loss else torch.tensor(1, device=logits.device)),
         {
-            "keys": list(log.keys()),
+            "keys": metric_keys,
             "values": log_values,
+            "metric_denominators": metric_denominator_values,
         },
     )

@@ -29,6 +29,116 @@ class FeedbackRecord:
         return bool(self.feedback)
 
 
+class FeedbackProvider:
+    """Normalize reward/environment output into a reusable feedback record.
+
+    The provider deliberately consumes a ``Sample`` rather than owning an
+    environment. An interactive environment can expose the same
+    ``extract(sample)`` contract through a small adapter, while ordinary
+    single-turn tasks use the reward payload already attached to the sample.
+    """
+
+    def __init__(
+        self,
+        *,
+        reward_key: str | None = None,
+        success_reward_threshold: float = 1.0,
+        extractor: Callable[[Sample], FeedbackRecord] | None = None,
+    ) -> None:
+        self.reward_key = reward_key
+        self.success_reward_threshold = success_reward_threshold
+        self._extractor = extractor
+
+    def extract(self, sample: Sample) -> FeedbackRecord:
+        if self._extractor is not None:
+            return self._extractor(sample)
+        reward = sample.reward
+        reward_dict = reward if isinstance(reward, dict) else None
+        score_value: Any = reward
+        if reward_dict is not None:
+            score_value = reward_dict.get(self.reward_key or "score")
+            if score_value is None:
+                score_value = reward_dict.get("reward")
+
+        score = _to_float(score_value)
+        feedback = ""
+        raw_feedback = None
+        error = None
+        if reward_dict is not None:
+            raw_feedback = reward_dict.get("feedback_raw")
+            error_text = _as_text(reward_dict.get("error"))
+            error = error_text or None
+            for key in ("feedback", "feedback_raw", "error"):
+                feedback = _as_text(reward_dict.get(key))
+                if feedback:
+                    break
+
+        if not feedback:
+            metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+            feedback = _as_text(metadata.get("feedback"))
+
+        return FeedbackRecord(
+            score=score,
+            feedback=feedback,
+            raw_feedback=raw_feedback,
+            error=error,
+            is_success=(
+                score is not None and score >= self.success_reward_threshold and bool(_as_text(sample.response))
+            ),
+        )
+
+
+def validate_sdpo_text_only(sample: Sample) -> None:
+    """Reject multimodal state at the SDPO teacher boundary."""
+
+    def present(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, dict):
+            media_keys = ("images", "videos", "audio")
+            if any(key in value for key in media_keys):
+                return any(present(value.get(key)) for key in media_keys)
+            return any(present(item) for item in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return any(present(item) for item in value)
+        if isinstance(value, str):
+            return bool(value)
+        if hasattr(value, "numel"):
+            return bool(value.numel())
+        size = getattr(value, "size", None)
+        if isinstance(size, int):
+            return size > 0
+        return True
+
+    for field_name in (
+        "multimodal_inputs",
+        "multimodal_train_inputs",
+        "teacher_multimodal_inputs",
+        "teacher_image_data",
+        "teacher_image_b64_list",
+        "teacher_image_grid_thw",
+    ):
+        if present(getattr(sample, field_name, None)):
+            raise ValueError(f"SDPO only supports text inputs; sample contains {field_name}")
+
+    def validate_prompt(prompt: Any, field_name: str) -> None:
+        if prompt is None or isinstance(prompt, str):
+            return
+        if not isinstance(prompt, list):
+            raise ValueError(f"SDPO only supports text {field_name}; expected a string or text messages")
+        for index, message in enumerate(prompt):
+            if not isinstance(message, dict) or not isinstance(message.get("role"), str):
+                raise ValueError(f"SDPO text message {index} in {field_name} must contain a string role")
+            if "content" in message and not isinstance(message["content"], str):
+                raise ValueError(f"SDPO only supports string message content in {field_name}")
+
+    for field_name in ("prompt", "teacher_prompt"):
+        validate_prompt(getattr(sample, field_name, None), field_name)
+    metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    if "sdpo_prompt" in metadata:
+        validate_prompt(metadata["sdpo_prompt"], "metadata.sdpo_prompt")
+
+
 class TeacherPromptRenderer:
     """Render privileged solution and feedback context for the teacher only."""
 
@@ -77,7 +187,7 @@ class TeacherPromptRenderer:
                 if not isinstance(message, dict) or not isinstance(message.get("role"), str):
                     raise TypeError(f"SDPO text prompt message {index} must contain a string role")
                 if "content" in message and not isinstance(message["content"], str):
-                    raise TypeError("SDPO-lite only supports text chat message content")
+                    raise ValueError("Relax-SDPO only supports text chat message content")
             if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "user":
                 return messages
             return messages + [{"role": "user", "content": ""}]
@@ -114,7 +224,7 @@ class SdpoPromptBuilder:
     def __init__(
         self,
         *,
-        feedback_provider: Callable[[Sample], FeedbackRecord] | None = None,
+        feedback_provider: FeedbackProvider | Callable[[Sample], FeedbackRecord] | None = None,
         prompt_renderer: TeacherPromptRenderer | None = None,
         reward_key: str | None = None,
         success_reward_threshold: float = 1.0,
@@ -122,6 +232,10 @@ class SdpoPromptBuilder:
         feedback_only_without_solution: bool = False,
     ) -> None:
         self.feedback_provider = feedback_provider
+        self.default_feedback_provider = FeedbackProvider(
+            reward_key=reward_key,
+            success_reward_threshold=success_reward_threshold,
+        )
         self.prompt_renderer = prompt_renderer or TeacherPromptRenderer()
         self.reward_key = reward_key
         self.success_reward_threshold = success_reward_threshold
@@ -131,12 +245,13 @@ class SdpoPromptBuilder:
     def apply(self, samples: list[Sample]) -> SdpoPromptStats:
         """Apply teacher-context routing and write SDPO fields to samples."""
 
-        sdpo_samples = [sample for sample in samples if _is_sdpo_sample(sample)]
-        if not sdpo_samples:
+        if not samples:
             return SdpoPromptStats()
+        for sample in samples:
+            validate_sdpo_text_only(sample)
 
-        groups = self._resolve_groups(sdpo_samples)
-        records = {id(sample): self._get_feedback(sample) for sample in sdpo_samples}
+        groups = self._resolve_groups(samples)
+        records = {id(sample): self._get_feedback(sample) for sample in samples}
         valid_samples = 0
         feedback_available = 0
         feedback_used = 0
@@ -145,9 +260,7 @@ class SdpoPromptBuilder:
 
         for group in groups.values():
             successful = [
-                sample
-                for sample in group
-                if records[id(sample)].is_success and bool(_as_text(sample.response))
+                sample for sample in group if records[id(sample)].is_success and bool(_as_text(sample.response))
             ]
             if successful:
                 successful_groups += 1
@@ -158,18 +271,25 @@ class SdpoPromptBuilder:
                     feedback_available += 1
 
                 solution = self._select_successful_response(successful, sample)
-                use_feedback = record.has_feedback and (
-                    not self.feedback_only_without_solution or not solution
-                )
+                use_feedback = record.has_feedback and (not self.feedback_only_without_solution or not solution)
                 if use_feedback:
                     feedback_used += 1
 
                 has_teacher_context = bool(solution or use_feedback)
-                sample.sdpo_valid = has_teacher_context
-                sample.teacher_prompt = self.prompt_renderer.render(
-                    sample,
-                    solution=solution,
-                    feedback=record.feedback if use_feedback else "",
+                if int(sample.response_length or 0) > 0 and not has_teacher_context:
+                    raise ValueError(
+                        "SDPO requires privileged teacher context for every non-empty response: "
+                        f"sample_index={sample.index}, group_index={sample.group_index}, "
+                        "but no feedback or other successful response is available"
+                    )
+                sample.teacher_prompt = (
+                    self.prompt_renderer.render(
+                        sample,
+                        solution=solution,
+                        feedback=record.feedback if use_feedback else "",
+                    )
+                    if has_teacher_context
+                    else None
                 )
                 sample.teacher_tokens = None
                 sample.teacher_prompt_length = None
@@ -180,7 +300,7 @@ class SdpoPromptBuilder:
                     successful_demonstrations += 1
 
         return SdpoPromptStats(
-            total_samples=len(sdpo_samples),
+            total_samples=len(samples),
             valid_samples=valid_samples,
             feedback_available=feedback_available,
             feedback_used=feedback_used,
@@ -190,45 +310,11 @@ class SdpoPromptBuilder:
         )
 
     def _get_feedback(self, sample: Sample) -> FeedbackRecord:
-        if self.feedback_provider is not None:
-            return self.feedback_provider(sample)
-
-        reward = sample.reward
-        reward_dict = reward if isinstance(reward, dict) else None
-        score_value: Any = reward
-        if reward_dict is not None:
-            score_value = reward_dict.get(self.reward_key or "score")
-            if score_value is None:
-                score_value = reward_dict.get("reward")
-
-        score = _to_float(score_value)
-        feedback = ""
-        raw_feedback = None
-        error = None
-        if reward_dict is not None:
-            raw_feedback = reward_dict.get("feedback_raw")
-            error_text = _as_text(reward_dict.get("error"))
-            error = error_text or None
-            for key in ("feedback", "feedback_raw", "error"):
-                feedback = _as_text(reward_dict.get(key))
-                if feedback:
-                    break
-
-        if not feedback:
-            metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
-            feedback = _as_text(metadata.get("feedback"))
-
-        return FeedbackRecord(
-            score=score,
-            feedback=feedback,
-            raw_feedback=raw_feedback,
-            error=error,
-            is_success=(
-                score is not None
-                and score >= self.success_reward_threshold
-                and bool(_as_text(sample.response))
-            ),
-        )
+        if self.feedback_provider is None:
+            return self.default_feedback_provider.extract(sample)
+        if isinstance(self.feedback_provider, FeedbackProvider):
+            return self.feedback_provider.extract(sample)
+        return self.feedback_provider(sample)
 
     @staticmethod
     def _resolve_groups(samples: Iterable[Sample]) -> dict[Hashable, list[Sample]]:
@@ -236,11 +322,7 @@ class SdpoPromptBuilder:
         for position, sample in enumerate(samples):
             # A missing group id must never allow unrelated prompts to share a
             # successful response. Such a sample therefore forms a singleton.
-            key = (
-                sample.group_index
-                if sample.group_index is not None
-                else ("sdpo-singleton", position)
-            )
+            key = sample.group_index if sample.group_index is not None else ("sdpo-singleton", position)
             groups[key].append(sample)
         return dict(groups)
 
@@ -273,11 +355,6 @@ def prepare_sdpo_teacher_prompts(
     return builder.apply(samples)
 
 
-def _is_sdpo_sample(sample: Sample) -> bool:
-    metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
-    return bool(metadata.get("sdpo", False))
-
-
 def _as_text(value: Any) -> str:
     if value is None:
         return ""
@@ -297,8 +374,10 @@ def _to_float(value: Any) -> float | None:
 
 __all__ = [
     "FeedbackRecord",
+    "FeedbackProvider",
     "SdpoPromptBuilder",
     "SdpoPromptStats",
     "TeacherPromptRenderer",
     "prepare_sdpo_teacher_prompts",
+    "validate_sdpo_text_only",
 ]
