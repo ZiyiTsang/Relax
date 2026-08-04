@@ -46,6 +46,7 @@ def _batch(response_lengths: list[int], *, topk_teacher=None, topk_ids=None) -> 
 
 
 def _import_megatron_loss():
+    pytest.importorskip("megatron.core")
     return importlib.import_module("relax.backends.megatron.loss")
 
 
