@@ -225,19 +225,6 @@ def get_per_token_loss_scale(
     return base_scale * step_token_normalizer
 
 
-def expand_step_loss_normalizers(
-    step_loss_normalizers: list[torch.Tensor], num_microbatches: list[int]
-) -> list[torch.Tensor]:
-    """Assign one step-global normalizer to every micro-batch in that step."""
-    if len(step_loss_normalizers) != len(num_microbatches):
-        raise ValueError("step_loss_normalizers and num_microbatches must have the same length.")
-    return [
-        step_loss_normalizers[step_index]
-        for step_index, microbatch_count in enumerate(num_microbatches)
-        for _ in range(microbatch_count)
-    ]
-
-
 def get_cp_local_num_tokens(
     total_lengths: list[int],
     response_lengths: list[int],

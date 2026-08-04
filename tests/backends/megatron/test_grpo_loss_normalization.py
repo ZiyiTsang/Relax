@@ -1,3 +1,5 @@
+from argparse import Namespace
+
 import pytest
 
 
@@ -51,6 +53,102 @@ def cp_utils_module():
     from relax.backends.megatron import cp_utils
 
     return cp_utils
+
+
+@pytest.fixture()
+def megatron_data_environment(tmp_path):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("megatron.training")
+    pytest.importorskip("tensordict")
+
+    import torch.distributed as dist
+    from megatron.core import mpu
+
+    from relax.backends.megatron import data
+    from relax.utils import device as device_utils
+
+    if device_utils.get_device_name() != "cpu":
+        pytest.skip("The real Megatron data-iterator integration test requires a CPU process group.")
+    if dist.is_initialized() or mpu.model_parallel_is_initialized():
+        pytest.skip("The test process already has Megatron parallel state initialized.")
+
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{tmp_path / 'megatron-data-test'}",
+        rank=0,
+        world_size=1,
+    )
+    try:
+        mpu.initialize_model_parallel(
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+            context_parallel_size=1,
+            create_gloo_process_groups=False,
+        )
+        yield torch, data
+    finally:
+        mpu.destroy_model_parallel()
+        dist.destroy_process_group()
+
+
+def test_real_megatron_static_iterator_reuses_step_normalizer(megatron_data_environment):
+    torch, data_module = megatron_data_environment
+
+    args = Namespace(
+        balance_data=True,
+        calculate_per_token_loss=True,
+        pg_loss_aggregation="seq-mean-token-sum-norm",
+        global_batch_size=5,
+        micro_batch_size=1,
+        use_dynamic_batch_size=False,
+    )
+    rollout_data = {
+        "total_lengths": list(range(5)),
+        "loss_masks": [torch.ones(1), torch.ones(2), torch.ones(3), torch.ones(4), torch.ones(5)],
+        data_module.ROLLOUT_MINI_LOCAL_SAMPLE_COUNTS_KEY: [2, 3],
+    }
+
+    data_iterators, num_microbatches = data_module.get_data_iterator(args, torch.nn.Module(), rollout_data)
+
+    assert num_microbatches == [2, 3]
+    iterator = data_iterators[0]
+    batches = [iterator.get_next(["total_lengths"]) for _ in range(sum(num_microbatches))]
+    assert [batch["total_lengths"] for batch in batches] == [[0], [1], [2], [3], [4]]
+    assert torch.equal(
+        torch.stack([batch["__per_token_loss_normalizer__"] for batch in batches]),
+        torch.tensor([3.0, 3.0, 12.0, 12.0, 12.0]),
+    )
+
+    iterator.reset()
+    assert torch.equal(iterator.get_next(["total_lengths"])["__per_token_loss_normalizer__"], torch.tensor(3.0))
+
+
+def test_real_megatron_dynamic_iterator_reuses_step_normalizer(megatron_data_environment):
+    torch, data_module = megatron_data_environment
+
+    args = Namespace(
+        balance_data=True,
+        calculate_per_token_loss=True,
+        pg_loss_aggregation="seq-mean-token-sum-norm",
+        global_batch_size=5,
+        max_tokens_per_gpu=4,
+        use_dynamic_batch_size=True,
+    )
+    rollout_data = {
+        "total_lengths": [2, 2, 3, 1, 1],
+        "loss_masks": [torch.ones(1), torch.ones(2), torch.ones(3), torch.ones(4), torch.ones(5)],
+        data_module.ROLLOUT_MINI_LOCAL_SAMPLE_COUNTS_KEY: [2, 3],
+    }
+
+    data_iterators, num_microbatches = data_module.get_data_iterator(args, torch.nn.Module(), rollout_data)
+
+    assert num_microbatches == [1, 2]
+    iterator = data_iterators[0]
+    batches = [iterator.get_next(["total_lengths"]) for _ in range(sum(num_microbatches))]
+    assert torch.equal(
+        torch.stack([batch["__per_token_loss_normalizer__"] for batch in batches]),
+        torch.tensor([3.0, 12.0, 12.0]),
+    )
 
 
 def test_response_length_normalization_preserves_existing_behavior(cp_utils_module):
@@ -189,16 +287,6 @@ def test_per_token_finalizer_requires_step_global_not_microbatch_normalizer(cp_u
 
     assert torch.isclose(correct_loss, torch.tensor(10.0 / 16.0))
     assert not torch.isclose(microbatch_weighted_loss, correct_loss)
-
-
-def test_step_loss_normalizer_is_shared_by_each_microbatch_in_a_step(cp_utils_module):
-    import torch
-
-    first_step, second_step = torch.tensor(7.0), torch.tensor(11.0)
-
-    expanded = cp_utils_module.expand_step_loss_normalizers([first_step, second_step], [2, 3])
-
-    assert expanded == [first_step, first_step, second_step, second_step, second_step]
 
 
 def test_static_cp_dr_grpo_matches_cp_one_fixed_scale_gradient(tmp_path, cp_utils_module):
