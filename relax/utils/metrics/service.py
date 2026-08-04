@@ -14,7 +14,7 @@ from relax.utils.logging_utils import get_logger
 from relax.utils.metrics.adapters.apprise import _AppriseAdapter
 from relax.utils.metrics.adapters.clearml import _ClearMLAdapter
 from relax.utils.metrics.adapters.tensorboard import _TensorboardAdapter
-from relax.utils.metrics.adapters.wandb import _is_offline_mode, init_wandb_secondary
+from relax.utils.metrics.adapters.wandb import _is_offline_mode
 from relax.utils.metrics.timeline_trace import TimelineTraceAdapter
 
 
@@ -152,14 +152,11 @@ class MetricsService:
     def _init_wandb(config: Namespace) -> None:
         """Initialize W&B for the MetricsService.
 
-        Join the primary training run when one is available. Standalone
-        deployments without a primary run keep their own W&B run.
+        Unlike init_wandb_primary (designed for training workers with
+        rank/group), MetricsService is a single Ray Serve replica that only
+        needs basic project and run name configuration.
         """
         import os
-
-        if getattr(config, "wandb_run_id", None):
-            init_wandb_secondary(config)
-            return
 
         if config.wandb_mode:
             os.environ["WANDB_MODE"] = config.wandb_mode

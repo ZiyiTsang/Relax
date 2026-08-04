@@ -8,13 +8,14 @@ Relax 框架集成了多种策略梯度算法，均通过 `--advantage-estimator
 
 ## 支持的算法
 
-| 算法      | 启用参数                      | 推荐场景                   |
-| --------- | ----------------------------- | -------------------------- |
-| **PPO**   | `--advantage-estimator ppo`   | Actor-Critic、token 级 GAE |
-| **GRPO**  | `--advantage-estimator grpo`  | 默认、大多数场景           |
-| **CISPO** | `--advantage-estimator cispo` | 保留梯度方向、需要更高精度 |
-| **GSPO**  | `--advantage-estimator gspo`  | 序列级约束、稳定训练       |
-| **SAPO**  | `--advantage-estimator sapo`  | 平滑优化、soft 信任域      |
+| 算法        | 启用参数                      | 推荐场景                   |
+| ----------- | ----------------------------- | -------------------------- |
+| **PPO**     | `--advantage-estimator ppo`   | Actor-Critic、token 级 GAE |
+| **GRPO**    | `--advantage-estimator grpo`  | 默认、大多数场景           |
+| **Dr.GRPO** | GRPO + 固定长度目标参数       | 消除长度偏置               |
+| **CISPO**   | `--advantage-estimator cispo` | 保留梯度方向、需要更高精度 |
+| **GSPO**    | `--advantage-estimator gspo`  | 序列级约束、稳定训练       |
+| **SAPO**    | `--advantage-estimator sapo`  | 平滑优化、soft 信任域      |
 
 ## 选择建议
 
@@ -31,6 +32,29 @@ Relax 框架集成了多种策略梯度算法，均通过 `--advantage-estimator
 - 默认算法，特性平衡，大多数场景可用
 - 对超出信任域的 token 直接置零梯度
 - 适合大多数强化学习场景
+
+### Dr.GRPO（GRPO 的两个修改）
+
+Dr.GRPO 对标准 GRPO 做两个相互独立的修改：
+
+1. 关闭组内 reward 的标准差归一化，只使用中心化后的 advantage：
+   `--disable-grpo-std-normalization`
+2. 将 policy-gradient token loss 按固定的回复长度尺度归一化，而不是按每个回复的实际 token 数归一化：
+   `--pg-loss-aggregation seq-mean-token-sum-norm`
+
+在 Relax 中，第二个修改还需要启用 per-token loss 路径。完整参数组合如下：
+
+```bash
+DR_GRPO_ARGS=(
+   --advantage-estimator grpo
+   --disable-grpo-std-normalization
+   --pg-loss-aggregation seq-mean-token-sum-norm
+   --calculate-per-token-loss
+)
+```
+
+`--pg-loss-scale-factor` 可显式指定固定尺度；未指定时默认使用
+`--rollout-max-response-len`。这组参数必须使用 `grpo`，不能与 CISPO 或 GSPO 的 advantage estimator 混用；当前固定长度 per-token 路径也不支持 `--fully-async`，应使用 colocate 或其它静态训练拓扑。
 
 ### CISPO（保留梯度信号）
 
@@ -91,8 +115,7 @@ export MODEL_DIR=/path/to/Qwen3.5-9B
 export DATA_DIR=/path/to/multimodal-open-r1-8k-verified
 export EXP_DIR=/path/to/experiments
 
-# 2) 运行 CISPO 异步训练（Fully Async 模式）
-cd /fengxiaoshi/Relax
+# 2) 在 Relax 仓库根目录运行 CISPO 异步训练（Fully Async 模式）
 bash examples/algorithms/cispo/run-qwen35-9B-8xgpu-openr1mm-cispo-async.sh async
 
 # 或运行同步训练（Colocate 模式）
