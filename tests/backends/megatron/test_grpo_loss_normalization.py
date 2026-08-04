@@ -1,7 +1,3 @@
-import importlib
-import sys
-from types import ModuleType
-
 import pytest
 
 
@@ -9,18 +5,7 @@ def _run_static_cp_dr_grpo_worker(rank: int, init_method: str, result_path: str)
     import torch
     import torch.distributed as dist
 
-    megatron = ModuleType("megatron")
-    core = ModuleType("megatron.core")
-    mpu = ModuleType("megatron.core.mpu")
-    mpu.get_context_parallel_rank = lambda: rank
-    mpu.get_context_parallel_world_size = lambda: 2
-    core.mpu = mpu
-    megatron.core = core
-    sys.modules["megatron"] = megatron
-    sys.modules["megatron.core"] = core
-    sys.modules["megatron.core.mpu"] = mpu
-    sys.modules.pop("relax.backends.megatron.cp_utils", None)
-    cp_utils = importlib.import_module("relax.backends.megatron.cp_utils")
+    from relax.backends.megatron import cp_utils
 
     dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=2)
     try:
@@ -60,22 +45,12 @@ def _run_static_cp_dr_grpo_worker(rank: int, init_method: str, result_path: str)
 
 
 @pytest.fixture()
-def cp_utils_module(monkeypatch):
+def cp_utils_module():
     pytest.importorskip("torch")
-    megatron = ModuleType("megatron")
-    core = ModuleType("megatron.core")
-    mpu = ModuleType("megatron.core.mpu")
-    mpu.get_context_parallel_rank = lambda: 0
-    mpu.get_context_parallel_world_size = lambda: 1
-    core.mpu = mpu
-    megatron.core = core
-    monkeypatch.setitem(sys.modules, "megatron", megatron)
-    monkeypatch.setitem(sys.modules, "megatron.core", core)
-    monkeypatch.setitem(sys.modules, "megatron.core.mpu", mpu)
-    sys.modules.pop("relax.backends.megatron.cp_utils", None)
-    module = importlib.import_module("relax.backends.megatron.cp_utils")
-    yield module
-    sys.modules.pop("relax.backends.megatron.cp_utils", None)
+    pytest.importorskip("megatron")
+    from relax.backends.megatron import cp_utils
+
+    return cp_utils
 
 
 def test_response_length_normalization_preserves_existing_behavior(cp_utils_module):
@@ -85,6 +60,7 @@ def test_response_length_normalization_preserves_existing_behavior(cp_utils_modu
         total_lengths=[4, 5],
         response_lengths=[2, 3],
         loss_masks=[torch.tensor([1.0, 0.0]), torch.tensor([1.0, 1.0, 0.0])],
+        dynamic_cp_size=1,
     )
 
     value = reducer(torch.tensor([2.0, 11.0, 3.0, 5.0, 13.0]))
@@ -101,6 +77,7 @@ def test_seq_mean_token_sum_norm_uses_one_scale_factor_for_all_responses(cp_util
         response_lengths=[2, 3],
         loss_masks=[torch.tensor([1.0, 0.0]), torch.tensor([1.0, 1.0, 0.0])],
         scale_factor=4,
+        dynamic_cp_size=1,
     )
     values = torch.tensor([2.0, 11.0, 3.0, 5.0, 13.0], requires_grad=True)
 
@@ -121,6 +98,7 @@ def test_seq_mean_token_sum_norm_requires_positive_scale_factor(cp_utils_module)
             response_lengths=[1],
             loss_masks=[torch.tensor([1.0])],
             scale_factor=0,
+            dynamic_cp_size=1,
         )
 
 
@@ -235,6 +213,7 @@ def test_static_cp_dr_grpo_matches_cp_one_fixed_scale_gradient(tmp_path, cp_util
         response_lengths=[4],
         loss_masks=[torch.ones(4)],
         scale_factor=8,
+        dynamic_cp_size=1,
     )
     cp_one_loss = cp_one_reducer(cp_one_values)
     cp_one_loss.backward()
@@ -298,10 +277,15 @@ def test_sum_norm_reweights_short_vs_long_responses(cp_utils_module):
     values = torch.ones(520)
 
     seq_mean = cp_utils_module.get_sequence_loss_aggregator(
-        "seq-mean-token-mean", total_lengths, response_lengths, loss_masks
+        "seq-mean-token-mean", total_lengths, response_lengths, loss_masks, dynamic_cp_size=1
     )
     sum_norm = cp_utils_module.get_sequence_loss_aggregator(
-        "seq-mean-token-sum-norm", total_lengths, response_lengths, loss_masks, scale_factor=8
+        "seq-mean-token-sum-norm",
+        total_lengths,
+        response_lengths,
+        loss_masks,
+        scale_factor=8,
+        dynamic_cp_size=1,
     )
 
     seq_mean_loss = seq_mean(values)
