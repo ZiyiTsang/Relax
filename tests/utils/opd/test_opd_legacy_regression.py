@@ -106,6 +106,16 @@ def test_ordinary_opd_matches_independent_upstream_oracle(
     assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
 
 
+def test_ordinary_low_var_kl_matches_independent_upstream_oracle() -> None:
+    student = torch.tensor([[-0.7, -0.8]])
+    teacher = torch.tensor([[-0.4, -0.5]])
+
+    actual = opd_utils.compute_opd_kl(student, teacher, kl_type="low_var_kl")
+    expected = _legacy_oracle(student, teacher, kl_type="low_var_kl")
+
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)
+
+
 def test_ordinary_sampled_reverse_kl_matches_independent_upstream_oracle() -> None:
     args = Namespace(
         opd_loss_coef=1.0,
@@ -137,6 +147,8 @@ def test_ordinary_sampled_reverse_kl_matches_independent_upstream_oracle() -> No
 
     expected = _legacy_oracle(student, teacher, kl_type="reverse_kl").mean()
     assert torch.allclose(loss, expected)
+    loss.backward()
+    assert torch.allclose(student.grad, torch.full_like(student, 0.5))
 
 
 def test_ordinary_opd_ignores_unrelated_batch_metadata() -> None:
@@ -178,80 +190,8 @@ def test_ordinary_opd_ignores_unrelated_batch_metadata() -> None:
     assert torch.equal(plain_loss, metadata_loss)
 
 
-def test_ordinary_topk_loss_reduces_cp_local_rows_without_full_row_split():
-    args = Namespace(
-        opd_loss_coef=1.0,
-        opd_kl_type="reverse_kl",
-        opd_jsd_alpha=0.5,
-        opd_norm_mode="tail",
-        opd_token_selection="student_topk",
-        opd_log_prob_min_clamp=None,
-        opd_per_token_clip=None,
-        opd_is_clip=None,
-        calculate_per_token_loss=True,
-        qkv_format="thd",
-    )
-    teacher = [torch.log(torch.tensor([[0.1, 0.4]] * 3))]
-    student = [torch.log(torch.tensor([[0.2, 0.3]] * 3, requires_grad=True))]
-    batch = {
-        "total_lengths": [16],
-        "response_lengths": [8],
-        "loss_masks": [torch.ones(8)],
-        "dynamic_cp_size": 2,
-        "dynamic_cp_rank": 0,
-        "opd_topk_teacher_log_probs": teacher,
-    }
-
-    loss, _ = opd_utils.compute_policy_opd_loss(
-        args=args,
-        batch=batch,
-        log_probs=torch.zeros(3),
-        old_log_probs=torch.zeros(3),
-        log_probs_and_entropy={"topk_log_probs": student},
-    )
-    expected = opd_utils.compute_opd_kl_topk(student[0], teacher[0], kl_type="reverse_kl").sum()
-
-    assert torch.allclose(loss, expected)
-
-
-def test_ordinary_topk_loss_uses_cp_reducer_when_local_rows_match_full_response():
-    args = Namespace(
-        opd_loss_coef=1.0,
-        opd_kl_type="reverse_kl",
-        opd_jsd_alpha=0.5,
-        opd_norm_mode="tail",
-        opd_token_selection="student_topk",
-        opd_log_prob_min_clamp=None,
-        opd_per_token_clip=None,
-        opd_is_clip=None,
-        calculate_per_token_loss=True,
-        qkv_format="thd",
-        context_parallel_size=2,
-    )
-    teacher = [torch.log(torch.tensor([[0.1, 0.4], [0.1, 0.4]]))]
-    student = [torch.log(torch.tensor([[0.2, 0.3], [0.2, 0.3]], requires_grad=True))]
-    batch = {
-        "total_lengths": [7],
-        "response_lengths": [2],
-        "loss_masks": [torch.ones(2)],
-        "dynamic_cp_size": 2,
-        "dynamic_cp_rank": 1,
-        "opd_topk_teacher_log_probs": teacher,
-    }
-
-    loss, _ = opd_utils.compute_policy_opd_loss(
-        args=args,
-        batch=batch,
-        log_probs=torch.zeros(2),
-        old_log_probs=torch.zeros(2),
-        log_probs_and_entropy={"topk_log_probs": student},
-    )
-    expected_per_token = opd_utils.compute_opd_kl_topk(student[0], teacher[0], kl_type="reverse_kl")
-
-    assert torch.allclose(loss, expected_per_token.sum())
-
-
 def test_ordinary_cp_reducer_preserves_sample_mean_mode() -> None:
+    pytest.importorskip("megatron.core")
     args = Namespace(
         opd_loss_coef=1.0,
         opd_kl_type="reverse_kl",

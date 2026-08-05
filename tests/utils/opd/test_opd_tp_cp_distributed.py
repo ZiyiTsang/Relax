@@ -337,12 +337,14 @@ def _tp_cp_topk_worker(rank: int, init_file: str) -> None:
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize(
-    "worker",
-    [_tp_global_vocab_worker, _cp_fixed_topk_worker, _cp_union_padded_worker],
-)
+@pytest.mark.parametrize("worker", [_cp_fixed_topk_worker, _cp_union_padded_worker])
 def test_two_rank_opd_sdpo_layout_contracts(tmp_path, worker) -> None:
     _spawn_two_ranks(worker, str(tmp_path / f"init-{worker.__name__}"))
+
+
+def test_two_rank_tp_global_vocab_contract(tmp_path) -> None:
+    pytest.importorskip("megatron.core")
+    _spawn_two_ranks(_tp_global_vocab_worker, str(tmp_path / "init-tp-global-vocab"))
 
 
 @pytest.mark.parametrize("worker", [_cp_reducer_boundary_worker, _cp_topk_reducer_boundary_worker])
@@ -351,4 +353,5 @@ def test_two_rank_opd_cp_reducer_boundaries(tmp_path, worker) -> None:
 
 
 def test_four_rank_tp_two_cp_two_topk_contract(tmp_path) -> None:
+    pytest.importorskip("megatron.core")
     _spawn_four_ranks(_tp_cp_topk_worker, str(tmp_path / "init-tp2-cp2"))

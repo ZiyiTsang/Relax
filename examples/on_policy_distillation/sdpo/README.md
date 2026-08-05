@@ -81,9 +81,12 @@ export RELAX_PYTHON=xxx/venv/relax-sdpo/bin/python
 export MEGATRON=xxx/venv/relax-sdpo-megatron
 export PYTHONPATH="${MEGATRON}:xxx/Research/relax-worktree"
 
-bash examples/on_policy_distillation/sdpo/run-grpo.sh
-bash examples/on_policy_distillation/sdpo/run-sdpo.sh
+MODE=grpo bash examples/on_policy_distillation/sdpo/run-2gpu.sh
+MODE=sdpo bash examples/on_policy_distillation/sdpo/run-2gpu.sh
 ```
+
+同一个入口也可用 `REPO=main` 运行 main checkout；此时设置
+`MAIN_REPO_ROOT`、`MAIN_RELAX_PYTHON` 和 `MAIN_MEGATRON`。
 
 `relax-sdpo` 是 Python/PyTorch 环境，`relax-sdpo-megatron` 是与当前 worktree 配套的
 Megatron 源码目录。

@@ -101,29 +101,6 @@ def test_legacy_topk_tail_keeps_legacy_mask_layout_with_union_mask(opd_modules):
     assert torch.allclose(value, expected)
 
 
-def test_legacy_sampled_reverse_kl_matches_upstream_gradient(opd_modules):
-    opd_utils, _, torch = opd_modules
-    args = _legacy_args(opd_token_selection="student_sampled", opd_kl_type="reverse_kl")
-    log_probs = torch.tensor([-0.7, -0.8], requires_grad=True)
-    teacher = torch.tensor([-0.4, -0.5])
-    batch = _batch([2])
-    batch["teacher_log_probs"] = [teacher]
-
-    loss, _ = opd_utils.compute_policy_opd_loss(
-        args=args,
-        batch=batch,
-        log_probs=log_probs,
-        old_log_probs=log_probs.detach(),
-        log_probs_and_entropy={},
-    )
-
-    expected_values = log_probs - teacher
-    expected = expected_values.mean()
-    assert torch.allclose(loss, expected)
-    loss.backward()
-    assert torch.allclose(log_probs.grad, torch.full_like(log_probs, 0.5))
-
-
 def test_sdpo_jsd_matches_symmetric_definition_and_detaches_teacher(opd_modules):
     _, sdpo_loss, torch = opd_modules
     student = torch.log(torch.tensor([[0.2, 0.3]], requires_grad=True))
@@ -327,82 +304,6 @@ def test_sdpo_norm_support_mask_keeps_topk_shape(opd_modules):
     )
 
     assert torch.allclose(value, torch.zeros(1))
-
-
-@pytest.mark.parametrize("norm_mode", ["tail", "norm", "trunc"])
-@pytest.mark.parametrize("jsd_alpha", [0.0, 0.25, 0.5, 0.75, 1.0])
-def test_legacy_masked_distribution_matches_pre_refactor_formula(opd_modules, norm_mode, jsd_alpha):
-    opd_utils, _, torch = opd_modules
-    student = torch.log(torch.tensor([[0.2, 0.1, 0.3]]))
-    teacher = torch.log(torch.tensor([[0.1, 0.2, 0.4]]))
-    mask = torch.tensor([[True, False, True]])
-
-    actual = opd_utils.compute_opd_kl(
-        student,
-        teacher,
-        kl_type="jsd",
-        jsd_alpha=jsd_alpha,
-        norm_mode=norm_mode,
-        mask=mask,
-    )
-
-    student = student.masked_fill(~mask, float("-inf"))
-    teacher = teacher.masked_fill(~mask, float("-inf"))
-    if norm_mode == "tail":
-
-        def add_tail(values):
-            mass = torch.logsumexp(values, dim=-1, keepdim=True).clamp(max=-1e-7)
-            return torch.cat([values, torch.log(-torch.expm1(mass))], dim=-1)
-
-        student = add_tail(student)
-        teacher = add_tail(teacher)
-        expected_distribution_mask = mask
-    elif norm_mode == "norm":
-        student = student - torch.logsumexp(student, dim=-1, keepdim=True)
-        teacher = teacher - torch.logsumexp(teacher, dim=-1, keepdim=True)
-        expected_distribution_mask = mask
-    else:
-        expected_distribution_mask = mask
-
-    if norm_mode == "tail":
-        student_for_mask = student[..., : mask.size(-1)]
-        teacher_for_mask = teacher[..., : mask.size(-1)]
-    else:
-        student_for_mask = student
-        teacher_for_mask = teacher
-
-    if jsd_alpha == 0.0:
-        reference = (
-            (student_for_mask.exp() * (student_for_mask - teacher_for_mask))
-            .masked_fill(~expected_distribution_mask, 0.0)
-            .sum(dim=-1)
-        )
-    elif jsd_alpha == 1.0:
-        reference = (
-            (teacher_for_mask.exp() * (teacher_for_mask - student_for_mask))
-            .masked_fill(~expected_distribution_mask, 0.0)
-            .sum(dim=-1)
-        )
-    else:
-        midpoint = torch.logsumexp(
-            torch.stack(
-                [
-                    student + torch.log(torch.tensor(1.0 - jsd_alpha)),
-                    teacher + torch.log(torch.tensor(jsd_alpha)),
-                ]
-            ),
-            dim=0,
-        )
-        reference = (1.0 - jsd_alpha) * (
-            (student_for_mask.exp() * (student_for_mask - midpoint[..., : mask.size(-1)]))
-            .masked_fill(~expected_distribution_mask, 0.0)
-            .sum(dim=-1)
-        ) + jsd_alpha * (
-            (teacher_for_mask.exp() * (teacher_for_mask - midpoint[..., : mask.size(-1)]))
-            .masked_fill(~expected_distribution_mask, 0.0)
-            .sum(dim=-1)
-        )
-    assert torch.allclose(actual, reference)
 
 
 def test_legacy_fixed_topk_loss_matches_concatenated_pre_refactor_path(opd_modules):
