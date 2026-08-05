@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Relax Authors. All Rights Reserved.
+
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Iterable
@@ -88,6 +90,8 @@ class _TensorBackuperNormal(TensorBackuper):
             if source_tensor.shape != target_tensor.shape or source_tensor.dtype != target_tensor.dtype:
                 raise ValueError(f"EMA snapshot mismatch for {name}.")
             if alpha == 1:
+                target_tensor.copy_(source_tensor)
+            elif not (source_tensor.is_floating_point() or source_tensor.is_complex()):
                 target_tensor.copy_(source_tensor)
             else:
                 target_tensor.mul_(1 - alpha).add_(source_tensor, alpha=alpha)

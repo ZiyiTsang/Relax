@@ -192,6 +192,14 @@ def test_sdpo_ema_accepts_managed_colocated_teacher(arguments_module):
     arguments_module.slime_validate_args(args)
 
 
+def test_sdpo_ema_rejects_when_opd_is_disabled(arguments_module):
+    args = _configure_sdpo_ema(_opd_args())
+    args.use_opd = False
+
+    with pytest.raises(ValueError, match="requires --use-opd"):
+        arguments_module.slime_validate_args(args)
+
+
 def test_sdpo_ema_rejects_external_teacher(arguments_module):
     args = _configure_sdpo_ema(_opd_args())
     args.teacher_hf_checkpoint = None

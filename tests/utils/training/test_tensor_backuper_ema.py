@@ -69,6 +69,27 @@ def test_ema_alpha_one_copies_source():
     assert torch.equal(backuper.get("actor_ema")["weight"], torch.tensor([8.0, 10.0]))
 
 
+def test_ema_copies_integral_and_boolean_buffers():
+    state = {
+        "weight": torch.tensor([1.0]),
+        "counter": torch.tensor([2], dtype=torch.int64),
+        "mask": torch.tensor([True, False], dtype=torch.bool),
+    }
+    backuper = TensorBackuper.create(source_getter=lambda: state.items(), single_tag=None)
+    backuper.backup("actor")
+    backuper.backup("actor_ema")
+
+    state["weight"] = torch.tensor([5.0])
+    state["counter"] = torch.tensor([9], dtype=torch.int64)
+    state["mask"] = torch.tensor([False, True], dtype=torch.bool)
+    backuper.backup("actor")
+    backuper.ema(source_tag="actor", target_tag="actor_ema", alpha=0.25)
+
+    assert torch.equal(backuper.get("actor_ema")["weight"], torch.tensor([2.0]))
+    assert torch.equal(backuper.get("actor_ema")["counter"], torch.tensor([9]))
+    assert torch.equal(backuper.get("actor_ema")["mask"], torch.tensor([False, True]))
+
+
 def test_ema_rejects_snapshot_key_shape_and_dtype_mismatch():
     _state, backuper = _make_backuper()
     backuper.backup("actor")

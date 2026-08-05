@@ -95,9 +95,7 @@ class Actor(Base):
         # `set.remove`. NCCL group setup is lazy — `connect_rollout_engines`
         # fires on the first real `update_weights` instead.
         if (not self.config.fully_async or self.config.hybrid) and not is_sft_mode(self.config):
-            self.actor_model.update_weights()
-            if is_sdpo_teacher_ema_enabled(self.config):
-                self.actor_model.publish_sdpo_teacher_ema()
+            self.actor_model.update_weights(publish_sdpo_teacher_ema=is_sdpo_teacher_ema_enabled(self.config))
 
     def set_barriers(
         self,

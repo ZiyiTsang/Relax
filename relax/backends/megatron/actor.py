@@ -981,8 +981,7 @@ class MegatronTrainRayActor(TrainRayActor):
             if self.args.offload_train:
                 self.sleep()
             if has_rollout:
-                self.update_weights()
-                self._publish_sdpo_teacher_ema()
+                self.update_weights(publish_sdpo_teacher_ema=self._sdpo_teacher_ema_enabled)
         tracking_utils.flush_metrics(self.args, compute_rollout_step(self.args, rollout_id))
         # RL-only generative eval (uses SGLang via rollout_manager.eval). SFT
         # uses local eval/predict runner below.
@@ -1454,8 +1453,7 @@ class MegatronTrainRayActor(TrainRayActor):
         self._check_services_health()
 
         # Sync weights to rollout via UpdateWeightFromTensor (colocate mode)
-        self.update_weights()
-        self._publish_sdpo_teacher_ema()
+        self.update_weights(publish_sdpo_teacher_ema=self._sdpo_teacher_ema_enabled)
         tracking_utils.flush_metrics(self.args, compute_rollout_step(self.args, rollout_id))
         dist.barrier(group=get_gloo_group())
         self._run_step_evaluation(rollout_id, end_update_weight=True)
@@ -1663,12 +1661,8 @@ class MegatronTrainRayActor(TrainRayActor):
         with timer("sdpo_teacher_ema_publish"):
             self.actor_ema_weight_updater.update_weights()
 
-    def publish_sdpo_teacher_ema(self) -> None:
-        """Publish the initialized EMA shadow before the first rollout request."""
-        self._publish_sdpo_teacher_ema()
-
     @timer
-    def update_weights(self) -> None:
+    def update_weights(self, publish_sdpo_teacher_ema: bool = False) -> None:
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
@@ -1727,6 +1721,9 @@ class MegatronTrainRayActor(TrainRayActor):
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights", clear_before_print=not device_utils.is_npu_available)
+
+            if publish_sdpo_teacher_ema:
+                self._publish_sdpo_teacher_ema()
 
             if self.args.ci_test and len(rollout_engines) > 0:
                 engine = random.choice(rollout_engines)

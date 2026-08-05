@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from transformers.tokenization_utils_base import BatchEncoding
 
 from relax.utils.opd.teacher_prefill_builder import TeacherPrefillBuilder, TeacherPrefillMode
 from relax.utils.types import Sample
@@ -174,6 +175,83 @@ def test_sdpo_dynamic_teacher_input_uses_text_path_only() -> None:
 
     assert sample.teacher_tokens == [100, 101, 20]
     assert sample.teacher_prompt_length == 2
+
+
+def test_sdpo_chat_template_normalizes_batch_encoding_to_token_ids() -> None:
+    class Tokenizer:
+        def apply_chat_template(self, prompt, **kwargs):
+            assert kwargs["return_dict"] is False
+            return BatchEncoding({"input_ids": [100, 101], "attention_mask": [1, 1]})
+
+    sample = Sample(
+        prompt="question",
+        teacher_prompt=[{"role": "user", "content": "privileged context"}],
+        tokens=[10, 20],
+        response_length=1,
+    )
+    worker = TeacherPrefillBuilder(TeacherPrefillMode.SDPO, tokenizer=Tokenizer())
+
+    asyncio.run(worker.prepare(object(), sample))
+
+    assert sample.teacher_tokens == [100, 101, 20]
+    assert all(isinstance(token_id, int) for token_id in sample.teacher_tokens)
+
+
+@pytest.mark.parametrize("encoding_attribute", ["input_ids", "ids"])
+def test_sdpo_dynamic_teacher_input_normalizes_tokenizer_encoding(encoding_attribute: str) -> None:
+    class Encoding:
+        def __init__(self) -> None:
+            setattr(self, encoding_attribute, [100, 101])
+
+    class Tokenizer:
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+            assert messages == [{"role": "user", "content": "privileged context"}]
+            assert tokenize is True
+            assert add_generation_prompt is True
+            return Encoding()
+
+    sample = Sample(
+        prompt="question",
+        teacher_prompt=[{"role": "user", "content": "privileged context"}],
+        tokens=[10, 20],
+        response_length=1,
+    )
+    worker = TeacherPrefillBuilder(TeacherPrefillMode.SDPO, tokenizer=Tokenizer())
+
+    asyncio.run(worker.prepare(object(), sample))
+
+    assert sample.teacher_tokens == [100, 101, 20]
+    assert all(isinstance(token_id, int) for token_id in sample.teacher_tokens)
+
+
+def test_sdpo_dynamic_teacher_input_normalizes_real_tokenizers_encoding() -> None:
+    pytest.importorskip("tokenizers")
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+
+    tokenizer = Tokenizer(WordLevel({"[UNK]": 0, "privileged": 100, "context": 101}, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+
+    class ChatTokenizer:
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+            assert messages == [{"role": "user", "content": "privileged context"}]
+            assert tokenize is True
+            assert add_generation_prompt is True
+            return tokenizer.encode("privileged context")
+
+    sample = Sample(
+        prompt="question",
+        teacher_prompt=[{"role": "user", "content": "privileged context"}],
+        tokens=[10, 20],
+        response_length=1,
+    )
+    worker = TeacherPrefillBuilder(TeacherPrefillMode.SDPO, tokenizer=ChatTokenizer())
+
+    asyncio.run(worker.prepare(object(), sample))
+
+    assert sample.teacher_tokens == [100, 101, 20]
+    assert all(isinstance(token_id, int) for token_id in sample.teacher_tokens)
 
 
 @pytest.mark.parametrize(

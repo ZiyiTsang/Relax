@@ -705,6 +705,8 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             raise ValueError("SDPO EMA is only available for on-policy RL training, not SFT.")
         return
 
+    if getattr(args, "sdpo_teacher_update_mode", "static") == "ema" and not getattr(args, "use_opd", False):
+        raise ValueError("--sdpo-teacher-update-mode=ema requires --use-opd.")
     if not getattr(args, "use_opd", False):
         return
     if args.opd_type is None:
