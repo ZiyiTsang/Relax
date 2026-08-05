@@ -191,6 +191,8 @@ case "${mode}" in
             --teacher-sglang-disable-cuda-graph
             --opd-loss-coef "${OPD_LOSS_COEF:-1.0}"
             --opd-loss-mode sdpo
+            --sdpo-teacher-update-mode "${SDPO_TEACHER_UPDATE_MODE:-static}"
+            --sdpo-teacher-ema-alpha "${SDPO_TEACHER_EMA_ALPHA:-0.01}"
             --opd-kl-coef 0.0
             --opd-token-selection student_topk
             --opd-log-prob-top-k "${OPD_TOP_K:-100}"
