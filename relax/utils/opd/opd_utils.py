@@ -86,10 +86,40 @@ def is_managed_opd_teacher_colocate(args: Any) -> bool:
 
 
 def is_sdpo_teacher_ema_enabled(args: Any) -> bool:
+    feedback_class = getattr(args, "opd_feedback_class", None)
+    is_sdpo = False
+    if feedback_class:
+        try:
+            from relax.utils.opd.feedback import SDPOFeedback, load_feedback_class
+
+            is_sdpo = issubclass(load_feedback_class(feedback_class), SDPOFeedback)
+        except (ImportError, TypeError, ValueError):
+            is_sdpo = False
     return (
         getattr(args, "use_opd", False)
-        and getattr(args, "opd_loss_mode", "opd") == "sdpo"
         and getattr(args, "sdpo_teacher_update_mode", "static") == "ema"
+        and getattr(args, "group_rm", False)
+        and is_sdpo
+    )
+
+
+def is_sdpo_prompt_routing_enabled(args: Any) -> bool:
+    """Whether reward-completed groups should build privileged teacher
+    prompts."""
+    feedback_class = getattr(args, "opd_feedback_class", None)
+    if not feedback_class:
+        return False
+    try:
+        from relax.utils.opd.feedback import SDPOFeedback, load_feedback_class
+
+        is_sdpo = issubclass(load_feedback_class(feedback_class), SDPOFeedback)
+    except (ImportError, TypeError, ValueError):
+        is_sdpo = False
+    return (
+        getattr(args, "use_opd", False)
+        and getattr(args, "opd_type", None) == "sglang"
+        and getattr(args, "group_rm", False)
+        and is_sdpo
     )
 
 
@@ -499,13 +529,6 @@ def add_opd_arguments(parser: Any) -> Any:
         help=("On-policy distillation KL coefficient, Default 0.0."),
     )
     parser.add_argument(
-        "--opd-loss-mode",
-        type=str,
-        choices=("opd", "sdpo"),
-        default="opd",
-        help="Select the ordinary OPD criterion or the static-teacher SDPO criterion.",
-    )
-    parser.add_argument(
         "--sdpo-teacher-update-mode",
         type=str,
         choices=("static", "ema"),
@@ -669,6 +692,12 @@ def add_opd_arguments(parser: Any) -> Any:
         help=("Dataset field name that holds the teacher-side prompt for On-Policy Self-Distillation (OPSD). "),
     )
     parser.add_argument(
+        "--opd-feedback-class",
+        type=str,
+        default=None,
+        help="Fully qualified EnvironmentFeedback class. Required for every --use-opd run.",
+    )
+    parser.add_argument(
         "--opd-teacher-image-key",
         type=str,
         default=None,
@@ -724,6 +753,10 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
     if not getattr(args, "use_opd", False):
         return
 
+    from relax.utils.opd.feedback import load_feedback_class
+
+    load_feedback_class(getattr(args, "opd_feedback_class", None))
+
     # OPD is enabled here. Backfill the routing key so teacher routing AND the
     # per-source metrics (compute_mopd_metrics) get a consistent value even when
     # the user didn't pass --opd-teacher-key. The arg default stays None so that
@@ -747,12 +780,9 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
                 "use the standard zig-zag context-parallel layout."
             )
 
-    loss_mode = getattr(args, "opd_loss_mode", "opd")
     teacher_update_mode = getattr(args, "sdpo_teacher_update_mode", "static")
     if teacher_update_mode not in ("static", "ema"):
         raise ValueError(f"--sdpo-teacher-update-mode must be 'static' or 'ema', got {teacher_update_mode!r}.")
-    if teacher_update_mode == "ema" and loss_mode != "sdpo":
-        raise ValueError("--sdpo-teacher-update-mode=ema requires --opd-loss-mode=sdpo.")
     if teacher_update_mode == "ema":
         try:
             valid_ema_alpha = 0 < float(getattr(args, "sdpo_teacher_ema_alpha", 0.01)) <= 1
@@ -762,26 +792,29 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             raise ValueError(
                 f"--sdpo-teacher-ema-alpha must be in (0, 1], got {getattr(args, 'sdpo_teacher_ema_alpha', None)}."
             )
-    if loss_mode == "sdpo":
+    prompt_routing = is_sdpo_prompt_routing_enabled(args)
+    if prompt_routing or teacher_update_mode == "ema":
+        if teacher_update_mode == "ema" and not prompt_routing:
+            raise ValueError("SDPO EMA requires --group-rm and an SDPO feedback class.")
         if args.opd_type != "sglang":
-            raise ValueError("--opd-loss-mode=sdpo currently requires --opd-type=sglang.")
+            raise ValueError("SDPO prompt routing requires --opd-type=sglang.")
         if int(getattr(args, "pipeline_model_parallel_size", 1)) != 1:
-            raise ValueError("--opd-loss-mode=sdpo does not support pipeline parallelism.")
+            raise ValueError("SDPO prompt routing does not support pipeline parallelism.")
         if getattr(args, "enable_mtp_training", False):
-            raise ValueError("--opd-loss-mode=sdpo does not support MTP auxiliary loss.")
+            raise ValueError("SDPO prompt routing does not support MTP auxiliary loss.")
         if token_selection != "student_topk":
-            raise ValueError("--opd-loss-mode=sdpo only supports --opd-token-selection=student_topk.")
+            raise ValueError("SDPO prompt routing only supports --opd-token-selection=student_topk.")
         if args.opd_kl_type not in ("forward_kl", "reverse_kl", "jsd"):
-            raise ValueError("--opd-loss-mode=sdpo supports only --opd-kl-type=forward_kl, reverse_kl, or jsd.")
+            raise ValueError("SDPO prompt routing supports only forward_kl, reverse_kl, or jsd.")
         if getattr(args, "opd_norm_mode", "tail") == "trunc":
-            raise ValueError("--opd-loss-mode=sdpo requires --opd-norm-mode=tail or norm.")
+            raise ValueError("SDPO prompt routing requires --opd-norm-mode=tail or norm.")
         if not getattr(args, "calculate_per_token_loss", False):
-            raise ValueError("--opd-loss-mode=sdpo requires --calculate-per-token-loss.")
+            raise ValueError("SDPO prompt routing requires --calculate-per-token-loss.")
         if getattr(args, "multimodal_keys", None) or any(
             getattr(args, field_name, None) is not None
             for field_name in ("opd_teacher_image_key", "opd_teacher_video_key", "opd_teacher_audio_key")
         ):
-            raise ValueError("--opd-loss-mode=sdpo only supports text inputs; multimodal fields are not supported.")
+            raise ValueError("SDPO prompt routing only supports text inputs; multimodal fields are not supported.")
         if teacher_update_mode == "ema":
             if getattr(args, "teacher_hf_checkpoint", None) is None:
                 raise ValueError(
@@ -833,8 +866,8 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             "Use --opd-kl-coef=X --opd-loss-coef=0.0 for advantage mode, or "
             "--opd-kl-coef=0.0 --opd-loss-coef=X for loss mode."
         )
-    if loss_mode == "sdpo" and (opd_kl_coef != 0.0 or opd_loss_coef <= 0.0):
-        raise ValueError("--opd-loss-mode=sdpo requires --opd-kl-coef=0 and a positive --opd-loss-coef.")
+    if (prompt_routing or teacher_update_mode == "ema") and (opd_kl_coef != 0.0 or opd_loss_coef <= 0.0):
+        raise ValueError("SDPO loss and EMA teacher mode require --opd-kl-coef=0 and a positive --opd-loss-coef.")
 
     if getattr(args, "opd_teacher_prompt_key", None) is not None:
         if args.opd_type != "sglang":
@@ -1136,16 +1169,122 @@ def slice_opd_topk_rollout_fields(
     dynamic_cp_size: int | None = None,
     dynamic_cp_rank: int | None = None,
 ) -> None:
-    """Apply the shared CP response-row layout to ordinary OPD Top-K fields."""
+    """Slice generic OPD Top-K fields to the current CP response rows."""
+    if args.opd_token_selection not in ("student_topk", "teacher_topk", "union"):
+        return
 
-    from relax.utils.opd.topk_layout import slice_opd_topk_rollout_fields as slice_topk_layout
+    from relax.backends.megatron.cp_utils import get_logits_and_tokens_offset_with_cp, slice_log_prob_with_cp
+    from relax.utils.opd.opd_main_worker import TopkWorker
 
-    slice_topk_layout(
-        rollout_data,
-        args,
-        dynamic_cp_size=dynamic_cp_size,
-        dynamic_cp_rank=dynamic_cp_rank,
+    cp_size = dynamic_cp_size
+    if cp_size is None:
+        from megatron.core import mpu
+
+        cp_size = mpu.get_context_parallel_world_size()
+    if cp_size <= 1:
+        return
+    if getattr(args, "allgather_cp", False):
+        raise NotImplementedError(
+            "OPD Top-K fields require zig-zag CP slicing; allgather_cp=True is not supported yet."
+        )
+
+    total_lengths = rollout_data["total_lengths"]
+    response_lengths = rollout_data["response_lengths"]
+    max_seq_lens = rollout_data.get("max_seq_lens")
+    padded_total_lengths = rollout_data.get("padded_total_lengths")
+    local_response_lengths = []
+    for i, (total_length, response_length) in enumerate(zip(total_lengths, response_lengths, strict=True)):
+        _, _, logits_offsets, _ = get_logits_and_tokens_offset_with_cp(
+            int(total_length),
+            int(response_length),
+            args.qkv_format,
+            max_seq_lens[i] if max_seq_lens is not None else None,
+            padded_total_lengths[i] if padded_total_lengths is not None else None,
+            dynamic_cp_size=dynamic_cp_size,
+            dynamic_cp_rank=dynamic_cp_rank,
+        )
+        local_response_lengths.append(sum(end - start for start, end in logits_offsets))
+
+    fields = (
+        TopkWorker.TRANSFER_TOKEN_IDS,
+        TopkWorker.TRANSFER_STUDENT_LOG_PROBS,
+        TopkWorker.TRANSFER_TEACHER_LOG_PROBS,
     )
+    for field in fields:
+        values = rollout_data.get(field)
+        if values is None:
+            continue
+        if len(values) != len(total_lengths):
+            raise ValueError(f"OPD Top-K field {field!r} sample count does not match total_lengths")
+
+        sliced_values = []
+        for i, value in enumerate(values):
+            if value is None:
+                sliced_values.append(None)
+                continue
+            tensor = torch.as_tensor(value)
+            if tensor.numel() == 0:
+                k_size = tensor.shape[-1] if tensor.ndim > 1 else 0
+                sliced_values.append(tensor.reshape(0, k_size))
+                continue
+            if tensor.ndim != 2:
+                raise ValueError(f"OPD Top-K field {field!r} must have shape [response, K], got {tensor.shape}")
+            if tensor.size(1) == 0:
+                raise ValueError(f"OPD Top-K field {field!r} has zero K for non-empty response rows")
+            columns = [
+                slice_log_prob_with_cp(
+                    tensor[:, column],
+                    int(total_lengths[i]),
+                    int(response_lengths[i]),
+                    args.qkv_format,
+                    max_seq_lens[i] if max_seq_lens is not None else None,
+                    padded_total_length=padded_total_lengths[i] if padded_total_lengths is not None else None,
+                    dynamic_cp_size=dynamic_cp_size,
+                    dynamic_cp_rank=dynamic_cp_rank,
+                )
+                for column in range(tensor.size(1))
+            ]
+            sliced_tensor = torch.stack(columns, dim=1)
+            expected_rows = local_response_lengths[i]
+            if sliced_tensor.size(0) != expected_rows:
+                raise ValueError(
+                    f"OPD Top-K CP row mismatch: field={field}, sample={i}, "
+                    f"rows={sliced_tensor.size(0)}, expected={expected_rows}"
+                )
+            sliced_values.append(sliced_tensor)
+        rollout_data[field] = sliced_values
+
+    if args.opd_token_selection != "union":
+        return
+    values = rollout_data.get(TopkWorker.TRANSFER_K_LENGTHS)
+    if values is None:
+        return
+    if len(values) != len(total_lengths):
+        raise ValueError("OPD union Top-K lengths sample count does not match total_lengths")
+    sliced_lengths = []
+    for i, value in enumerate(values):
+        if value is None:
+            sliced_lengths.append(None)
+            continue
+        tensor = torch.as_tensor(value)
+        if tensor.numel() == 0:
+            sliced_lengths.append(tensor.reshape(0))
+            continue
+        sliced = slice_log_prob_with_cp(
+            tensor,
+            int(total_lengths[i]),
+            int(response_lengths[i]),
+            args.qkv_format,
+            max_seq_lens[i] if max_seq_lens is not None else None,
+            padded_total_length=padded_total_lengths[i] if padded_total_lengths is not None else None,
+            dynamic_cp_size=dynamic_cp_size,
+            dynamic_cp_rank=dynamic_cp_rank,
+        )
+        expected_rows = local_response_lengths[i]
+        if len(sliced) != expected_rows:
+            raise ValueError(f"OPD union Top-K row mismatch: sample={i}, rows={len(sliced)}, expected={expected_rows}")
+        sliced_lengths.append(sliced)
+    rollout_data[TopkWorker.TRANSFER_K_LENGTHS] = sliced_lengths
 
 
 def compute_log_probs_on_topk_token_ids(
@@ -1280,15 +1419,7 @@ def compute_opd_kl(
         if not (0.0 <= jsd_alpha <= 1.0):
             raise ValueError(f"jsd_alpha must be in [0, 1], got {jsd_alpha}")
 
-        from relax.utils.opd.topk_mask import OPDDistributionTopKMaskEstimator
-
-        mask_estimate = OPDDistributionTopKMaskEstimator.estimate(
-            mask,
-            norm_mode=norm_mode,
-            include_tail_bucket=False,
-        )
-        # Ordinary OPD keeps its historical Top-K column layout.
-        distribution_mask = mask_estimate.distribution_mask
+        distribution_mask = mask
 
         def _add_tail(lp: torch.Tensor) -> torch.Tensor:
             log_s = torch.logsumexp(lp, dim=-1, keepdim=True).clamp(max=-1e-7)

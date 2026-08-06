@@ -1,7 +1,8 @@
 # Relax-SDPO 示例
 
-本目录提供 GRPO/Relax-SDPO 的启动脚本，以及 SciKnowEval L3 和工具调用数据的离线准备
-入口。Relax-SDPO 默认使用独立的静态 teacher checkpoint；也可以显式启用 EMA teacher。
+本目录提供按数据集拆分的 Relax-SDPO 启动脚本，以及 SciKnowEval L3 和工具调用数据的离线准备
+入口。训练时每个原始问题生成 8 个 response，组成一个共享 `group_index` 的 group；两卡 smoke
+设置文件将其降为 2。Relax-SDPO 默认使用独立的静态 teacher checkpoint；也可以显式启用 EMA teacher。
 EMA 不创建新的训练 actor，而是在已有 actor 内维护 `actor_ema` CPU shadow，并在每个
 actor training call 后同步到 managed SGLang teacher。
 EMA teacher 启动时先使用 `TEACHER_MODEL_PATH` 作为可启动的 bootstrap，随后会在首个
@@ -84,11 +85,15 @@ export RELAX_PYTHON=xxx/venv/relax-sdpo/bin/python
 export MEGATRON=xxx/venv/relax-sdpo-megatron
 export PYTHONPATH="${MEGATRON}:xxx/Research/relax-worktree"
 
-MODE=grpo bash examples/on_policy_distillation/sdpo/run-2gpu.sh
-MODE=sdpo bash examples/on_policy_distillation/sdpo/run-2gpu.sh
+bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry.sh
 ```
 
-启用 EMA teacher 时，在 SDPO 启动参数中增加：
+本机设置集中在 `run-2gpu.sh`，它只导出 Python、Megatron、模型、数据根目录和 GPU 参数，不启动训练。
+可用数据集脚本为 `run-sciknoweval-{biology,chemistry,material,physics}.sh`、
+`run-tooluse.sh` 和 `run-toolalpaca.sh`。每个脚本都是完整 launcher，并显式传入自己的
+`--opd-feedback-class`；没有公共 SDPO launcher 或默认 Feedback 类。
+
+启用 EMA teacher 时设置：
 
 ```text
 --sdpo-teacher-update-mode ema

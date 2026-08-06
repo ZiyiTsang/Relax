@@ -77,6 +77,7 @@ EVAL_ARGS=(
 
 OPD_ARGS=(
    --use-opd
+   --opd-feedback-class relax.utils.opd.feedback.OPDFeedback
    --opd-type sglang
 
    --teacher-hf-checkpoint ${TEACHER_MODEL_PATH}

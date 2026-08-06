@@ -9,9 +9,9 @@ import aiohttp
 import numpy as np
 
 from relax.utils.logging_utils import get_logger
-from relax.utils.opd import opd_main_worker
+from relax.utils.opd import opd_main_worker, opd_opsd_worker
+from relax.utils.opd.opd_utils import is_sdpo_prompt_routing_enabled
 from relax.utils.opd.sdpo import SDPO_TOKEN_SELECTION, validate_sdpo_text_only
-from relax.utils.opd.teacher_prefill_builder import TeacherPrefillBuilder
 from relax.utils.types import Sample
 
 
@@ -106,10 +106,13 @@ def _pick_teacher_url(args, sample=None) -> str:
 class OpdManager:
     def __init__(self, args):
         self.args = args
-        self.is_sdpo = getattr(args, "opd_loss_mode", "opd") == "sdpo"
+        self.is_sdpo = is_sdpo_prompt_routing_enabled(args)
         self.topk_worker: opd_main_worker.TopkWorker | None = None
         self.sampled_worker: opd_main_worker.SampledTokenWorker | None = None  # 仅 student_sampled
-        self.teacher_prefill_builder = TeacherPrefillBuilder.from_args(args)
+        opsd_worker = opd_opsd_worker.OpsdWorker.from_args(args)
+        self.opsd_worker = opsd_worker if opsd_worker.is_opsd else None
+        if self.is_sdpo and self.opsd_worker is None:
+            self.opsd_worker = opd_opsd_worker.OpsdWorker(is_opsd=True)
 
         token_selection = args.opd_token_selection
         if token_selection != "student_sampled":
@@ -120,6 +123,10 @@ class OpdManager:
     @property
     def is_topk(self) -> bool:
         return self.topk_worker is not None
+
+    @property
+    def is_opsd(self) -> bool:
+        return self.opsd_worker is not None
 
     def _validate_sdpo_configuration(self) -> None:
         if not self.is_sdpo:
@@ -243,28 +250,9 @@ class OpdManager:
             for sample in sample_list:
                 self._clear_teacher_payload(sample)
 
-        prompt_stats = None
-        if self.is_sdpo:
-            from relax.utils.opd.sdpo import prepare_sdpo_teacher_prompts
-
-            prompt_stats = prepare_sdpo_teacher_prompts(
-                sample_list,
-                reward_key=getattr(self.args, "reward_key", None),
-            )
-            prompt_metrics = prompt_stats.as_dict()
-            logger.info(
-                "SDPO teacher prompt routing: valid=%d/%d context_ratio=%.4f "
-                "feedback_ratio=%.4f used_ratio=%.4f feedback=%d used=%d successful_demo=%d",
-                prompt_stats.valid_samples,
-                prompt_stats.total_samples,
-                prompt_metrics["valid_teacher_context_ratio"],
-                prompt_metrics["feedback_available_ratio"],
-                prompt_metrics["feedback_used_ratio"],
-                prompt_stats.feedback_available,
-                prompt_stats.feedback_used,
-                prompt_stats.successful_demonstrations,
-            )
-        await asyncio.gather(*[self.teacher_prefill_builder.prepare(self.args, sample) for sample in sample_list])
+        opsd_worker = getattr(self, "opsd_worker", None)
+        if opsd_worker is not None:
+            await asyncio.gather(*[opsd_worker.build_teacher_inputs(self.args, sample) for sample in sample_list])
 
         prefill_start = monotonic()
         if self.is_sdpo:
@@ -303,8 +291,6 @@ class OpdManager:
 
     def _needs_teacher_request(self, sample: Sample) -> bool:
         response_length = int(sample.response_length or 0)
-        if self.is_sdpo and response_length <= 0:
-            raise ValueError(f"SDPO requires a non-empty response; sample_index={getattr(sample, 'index', None)}")
         if response_length <= 0:
             return False
         if self.is_sdpo and not _has_sdpo_teacher_prompt(sample.teacher_prompt):
@@ -350,11 +336,18 @@ class OpdManager:
                 f"SDPO requires a teacher prompt for every non-empty response; sample_index={sample.index}"
             )
 
-        teacher_inputs = await self.teacher_prefill_builder.build(sample, response_length)
-        teacher_input_ids = teacher_inputs.input_ids
-        logprob_start_len = teacher_inputs.logprob_start_len
+        opsd_worker = getattr(self, "opsd_worker", None)
+        if opsd_worker is not None:
+            image_data = opsd_worker.build_preexpanded_image_data(sample)
+            teacher_input_ids = opsd_worker.teacher_input_ids(sample, response_length)
+            prompt_length = opsd_worker.teacher_prompt_len(sample, response_length)
+            logprob_start_len = max(prompt_length - 1, 0)
+        else:
+            image_data = None
+            teacher_input_ids = sample.rollout_tokens or sample.tokens
+            logprob_start_len = max(len(sample.tokens) - response_length - 1, 0)
 
-        mm_fields = {"image_data": teacher_inputs.image_data} if teacher_inputs.image_data is not None else None
+        mm_fields = {"image_data": image_data} if image_data is not None else None
         if self.topk_worker is not None:
             if self.is_sdpo:
                 from relax.utils.opd.sdpo import validate_sdpo_student_topk_ids

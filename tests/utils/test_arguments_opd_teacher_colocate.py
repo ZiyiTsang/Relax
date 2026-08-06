@@ -72,8 +72,8 @@ def _opd_args() -> SimpleNamespace:
         use_opd=True,
         opd_kl_coef=1.0,
         opd_loss_coef=0.0,
-        opd_loss_mode="opd",
         calculate_per_token_loss=True,
+        opd_feedback_class="relax.utils.opd.feedback.OPDFeedback",
         opd_teacher_prompt_key=None,
         opd_teacher_image_key=None,
         opd_teacher_video_key=None,
@@ -172,38 +172,19 @@ def test_opd_sampled_token_loss_is_accepted(arguments_module):
     arguments_module.slime_validate_args(args)
 
 
-def test_sdpo_loss_mode_is_parsed_and_validated(arguments_module):
-    arguments_module.RouterArgs = SimpleNamespace(add_cli_args=lambda parser, **_kwargs: parser)
-    parser = argparse.ArgumentParser()
-    arguments_module.get_slime_extra_args_provider()(parser)
-    parsed = parser.parse_args(["--opd-loss-mode", "sdpo"])
-
-    assert parsed.opd_loss_mode == "sdpo"
-    assert parsed.sdpo_teacher_update_mode == "static"
-    assert parsed.sdpo_teacher_ema_alpha == 0.01
-
-    args = _opd_args()
-    args.opd_loss_mode = "sdpo"
-    args.opd_token_selection = "student_topk"
-    args.opd_log_prob_top_k = 2
-    args.opd_kl_coef = 0.0
-    args.opd_loss_coef = 1.0
-    arguments_module.slime_validate_args(args)
-
-
-def test_opd_jsd_help_distinguishes_ordinary_opd_and_sdpo(arguments_module):
+def test_opd_jsd_help_describes_existing_alpha(arguments_module):
     arguments_module.RouterArgs = SimpleNamespace(add_cli_args=lambda parser, **_kwargs: parser)
     parser = argparse.ArgumentParser()
     arguments_module.get_slime_extra_args_provider()(parser)
 
     help_text = next(action.help for action in parser._actions if action.dest == "opd_jsd_alpha")
 
-    assert "Ordinary OPD uses alpha=0 for KL(student||teacher)" in help_text
-    assert "Relax-SDPO uses its separate criterion with these endpoints reversed" in help_text
+    assert "Mixture coefficient" in help_text
 
 
 def _configure_sdpo_ema(args):
-    args.opd_loss_mode = "sdpo"
+    args.group_rm = True
+    args.opd_feedback_class = "relax.utils.opd.feedback.SDPOFeedback"
     args.opd_token_selection = "student_topk"
     args.opd_log_prob_top_k = 2
     args.opd_kl_coef = 0.0
@@ -216,6 +197,12 @@ def _configure_sdpo_ema(args):
 
 
 def test_sdpo_ema_accepts_managed_colocated_teacher(arguments_module):
+    args = _configure_sdpo_ema(_opd_args())
+
+    arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_ema_does_not_require_loss_mode(arguments_module):
     args = _configure_sdpo_ema(_opd_args())
 
     arguments_module.slime_validate_args(args)
@@ -269,71 +256,6 @@ def test_sdpo_ema_rejects_invalid_alpha(arguments_module, alpha):
     args.sdpo_teacher_ema_alpha = alpha
 
     with pytest.raises(ValueError, match="sdpo-teacher-ema-alpha"):
-        arguments_module.slime_validate_args(args)
-
-
-def test_sdpo_loss_mode_rejects_non_student_topk(arguments_module):
-    args = _opd_args()
-    args.opd_loss_mode = "sdpo"
-    args.opd_token_selection = "teacher_topk"
-    args.opd_log_prob_top_k = 2
-    args.opd_kl_coef = 0.0
-    args.opd_loss_coef = 1.0
-
-    with pytest.raises(ValueError, match="only supports --opd-token-selection=student_topk"):
-        arguments_module.slime_validate_args(args)
-
-
-def test_sdpo_loss_mode_rejects_sampled_only_kl_estimator(arguments_module):
-    args = _opd_args()
-    args.opd_loss_mode = "sdpo"
-    args.opd_token_selection = "student_topk"
-    args.opd_log_prob_top_k = 2
-    args.opd_kl_type = "low_var_kl"
-    args.opd_kl_coef = 0.0
-    args.opd_loss_coef = 1.0
-
-    with pytest.raises(ValueError, match="supports only --opd-kl-type"):
-        arguments_module.slime_validate_args(args)
-
-
-def test_sdpo_loss_mode_rejects_pipeline_parallel(arguments_module):
-    args = _opd_args()
-    args.opd_loss_mode = "sdpo"
-    args.opd_token_selection = "student_topk"
-    args.opd_log_prob_top_k = 2
-    args.opd_kl_coef = 0.0
-    args.opd_loss_coef = 1.0
-    args.pipeline_model_parallel_size = 2
-
-    with pytest.raises(ValueError, match="does not support pipeline parallelism"):
-        arguments_module.slime_validate_args(args)
-
-
-def test_sdpo_loss_mode_rejects_mtp_auxiliary_loss(arguments_module):
-    args = _opd_args()
-    args.opd_loss_mode = "sdpo"
-    args.opd_token_selection = "student_topk"
-    args.opd_log_prob_top_k = 2
-    args.opd_kl_coef = 0.0
-    args.opd_loss_coef = 1.0
-    args.enable_mtp_training = True
-
-    with pytest.raises(ValueError, match="does not support MTP auxiliary loss"):
-        arguments_module.slime_validate_args(args)
-
-
-@pytest.mark.parametrize("field_name", ["multimodal_keys", "opd_teacher_image_key", "opd_teacher_video_key"])
-def test_sdpo_loss_mode_rejects_multimodal_configuration(arguments_module, field_name):
-    args = _opd_args()
-    args.opd_loss_mode = "sdpo"
-    args.opd_token_selection = "student_topk"
-    args.opd_log_prob_top_k = 2
-    args.opd_kl_coef = 0.0
-    args.opd_loss_coef = 1.0
-    setattr(args, field_name, {"image": "image"} if field_name == "multimodal_keys" else "media")
-
-    with pytest.raises(ValueError, match="only supports text inputs"):
         arguments_module.slime_validate_args(args)
 
 

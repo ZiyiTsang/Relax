@@ -18,7 +18,7 @@ import pytest
 
 from relax.engine.rollout.on_policy_distillation import OpdManager
 from relax.utils.opd.opd_main_worker import LogprobResponse, TopkWorker
-from relax.utils.opd.teacher_prefill_builder import TeacherPrefillBuilder, TeacherPrefillMode
+from relax.utils.opd.opd_opsd_worker import OpsdWorker
 from relax.utils.types import Sample
 
 
@@ -125,7 +125,7 @@ def test_sdpo_teacher_prefill_uses_privileged_prompt_offset(monkeypatch) -> None
     manager.is_sdpo = True
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
-    manager.teacher_prefill_builder = TeacherPrefillBuilder(TeacherPrefillMode.SDPO)
+    manager.opsd_worker = OpsdWorker(is_opsd=True)
 
     sample = Sample(
         tokens=[10, 11, 20, 21],
@@ -164,7 +164,7 @@ def test_ordinary_teacher_prefill_keeps_rollout_input_and_original_offset(monkey
     manager.is_sdpo = False
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
-    manager.teacher_prefill_builder = TeacherPrefillBuilder(TeacherPrefillMode.PLAIN_OPD)
+    manager.opsd_worker = OpsdWorker(is_opsd=True)
 
     sample = Sample(
         tokens=[10, 11, 20, 21],
@@ -211,7 +211,7 @@ def test_sdpo_rejects_invalid_student_topk_before_teacher_request(
     manager.is_sdpo = True
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
-    manager.teacher_prefill_builder = TeacherPrefillBuilder(TeacherPrefillMode.PLAIN_OPD)
+    manager.opsd_worker = OpsdWorker(is_opsd=True)
     sample = Sample(
         index=8,
         tokens=[10, 11, 20, 21],
@@ -254,22 +254,24 @@ def test_sdpo_accepts_student_topk() -> None:
     assert manager._validate_sdpo_configuration() is None
 
 
-def test_sdpo_manager_constructs_unified_teacher_prefill_builder() -> None:
+def test_sdpo_manager_constructs_opsd_worker() -> None:
     args = type(
         "Args",
         (),
         {
-            "opd_loss_mode": "sdpo",
             "opd_token_selection": "student_topk",
             "opd_log_prob_top_k": 2,
             "opd_kl_coef": 0.0,
             "opd_loss_coef": 1.0,
+            "group_rm": True,
+            "opd_teacher_prompt_key": "sdpo_prompt",
         },
     )()
 
     manager = OpdManager(args)
 
-    assert manager.teacher_prefill_builder.mode is TeacherPrefillMode.SDPO
+    assert manager.opsd_worker is not None
+    assert manager.opsd_worker.is_opsd
     assert manager._validate_sdpo_configuration() is None
 
 
@@ -278,11 +280,10 @@ def test_sdpo_empty_teacher_context_fails_before_teacher_request(teacher_prompt)
     manager = object.__new__(OpdManager)
     manager.is_sdpo = True
 
-    empty_context = Sample(response_length=3, teacher_prompt=teacher_prompt)
+    empty_context = Sample(response_length=0, teacher_prompt=teacher_prompt)
     usable_context = Sample(response_length=3, teacher_prompt=[{"role": "user", "content": "context"}])
 
-    with pytest.raises(ValueError, match="teacher prompt"):
-        manager._needs_teacher_request(empty_context)
+    assert manager._needs_teacher_request(empty_context) is False
     assert manager._needs_teacher_request(usable_context) is True
 
 
@@ -324,7 +325,6 @@ def test_sdpo_transfer_schema_contains_only_topk_payload() -> None:
 )
 def test_teacher_transfer_schema_matrix(mode, selection, kl_coef, loss_coef, expected) -> None:
     args = SimpleNamespace(
-        opd_loss_mode=mode,
         opd_token_selection=selection,
         opd_log_prob_top_k=2,
         opd_kl_coef=kl_coef,
@@ -387,7 +387,7 @@ def test_sdpo_prefill_rejects_multimodal_before_teacher_request() -> None:
     manager = object.__new__(OpdManager)
     manager.is_sdpo = True
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
-    manager.teacher_prefill_builder = TeacherPrefillBuilder(TeacherPrefillMode.SDPO)
+    manager.opsd_worker = OpsdWorker(is_opsd=True)
     sample = Sample(
         prompt="question",
         tokens=[10, 20],
@@ -409,7 +409,7 @@ def test_ordinary_prefill_does_not_clear_existing_teacher_payload(monkeypatch) -
     manager.is_sdpo = False
     manager.topk_worker = None
     manager.sampled_worker = None
-    manager.teacher_prefill_builder = TeacherPrefillBuilder(TeacherPrefillMode.PLAIN_OPD)
+    manager.opsd_worker = OpsdWorker(is_opsd=True)
     sample = Sample(response_length=1, teacher_log_probs=[-0.25])
 
     async def fake_teacher_prefill(requested_sample, session):
@@ -434,7 +434,7 @@ def test_ordinary_prefill_keeps_zero_response_teacher_dispatch(monkeypatch) -> N
     manager.is_sdpo = False
     manager.topk_worker = None
     manager.sampled_worker = None
-    manager.teacher_prefill_builder = TeacherPrefillBuilder(TeacherPrefillMode.PLAIN_OPD)
+    manager.opsd_worker = OpsdWorker(is_opsd=True)
     sample = Sample(response_length=0)
     requested = []
 

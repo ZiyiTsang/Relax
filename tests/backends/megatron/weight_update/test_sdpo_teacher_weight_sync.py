@@ -1,5 +1,7 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
+import importlib.util
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -221,6 +223,9 @@ def test_torch_memory_saver_uses_cpu_weight_serialization(monkeypatch):
     assert decoded["flattened_tensor"].device.type == "cpu"
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("transfer_queue") is None, reason="transfer_queue runtime package unavailable"
+)
 def test_sdpo_actor_snapshot_refreshes_before_ema_update():
     from relax.backends.megatron.actor import MegatronTrainRayActor
 
@@ -253,6 +258,9 @@ def test_sdpo_actor_snapshot_refreshes_before_ema_update():
     ]
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("transfer_queue") is None, reason="transfer_queue runtime package unavailable"
+)
 def test_actor_snapshot_refresh_keeps_ordinary_opd_without_ema():
     from relax.backends.megatron.actor import MegatronTrainRayActor
 
@@ -274,6 +282,9 @@ def test_actor_snapshot_refresh_keeps_ordinary_opd_without_ema():
     assert events == [("backup", "actor")]
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("transfer_queue") is None, reason="transfer_queue runtime package unavailable"
+)
 def test_sdpo_teacher_publish_hook_runs_after_student_publish(monkeypatch):
     from relax.backends.megatron import actor as actor_module
     from relax.backends.megatron.actor import MegatronTrainRayActor
@@ -310,6 +321,7 @@ def test_sdpo_teacher_publish_hook_runs_after_student_publish(monkeypatch):
     actor.weight_updater = _Updater()
     actor._torch_memory_saver_enabled = False
     actor.genrm_manager = None
+    actor._train_state_offloader = SimpleNamespace(disable_during_update=nullcontext)
     actor._publish_sdpo_teacher_ema = lambda: events.append("teacher_publish")
     monkeypatch.setattr(actor_module.ray, "get", lambda value: value)
     monkeypatch.setattr(actor_module, "print_memory", lambda *args, **kwargs: None)

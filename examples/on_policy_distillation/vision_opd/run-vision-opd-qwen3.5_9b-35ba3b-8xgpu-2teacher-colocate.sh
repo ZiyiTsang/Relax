@@ -74,6 +74,7 @@ ROLLOUT_ARGS=(
 
 OPD_ARGS=(
    --use-opd
+   --opd-feedback-class relax.utils.opd.feedback.OPSDFeedback
    --opd-type sglang
    --teacher-hf-checkpoint "${MODEL_DIR}/${TEACHER_MODEL_NAME}/"
 

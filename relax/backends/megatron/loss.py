@@ -1014,26 +1014,14 @@ def policy_loss_function(
 
         loss = loss + args.kl_loss_coef * kl_loss
 
-    if getattr(args, "opd_loss_mode", "opd") == "sdpo":
-        from relax.utils.opd.sdpo.loss import compute_sdpo_loss
-
-        opd_loss, opd_reported_loss = compute_sdpo_loss(
-            args=args,
-            batch=batch,
-            log_probs=log_probs,
-            old_log_probs=old_log_probs,
-            log_probs_and_entropy=log_probs_and_entropy,
-            sum_of_sample_mean=sum_of_sample_mean,
-        )
-    else:
-        opd_loss, opd_reported_loss = compute_policy_opd_loss(
-            args=args,
-            batch=batch,
-            log_probs=log_probs,
-            old_log_probs=old_log_probs,
-            log_probs_and_entropy=log_probs_and_entropy,
-            sum_of_sample_mean=sum_of_sample_mean,
-        )
+    opd_loss, opd_reported_loss = compute_policy_opd_loss(
+        args=args,
+        batch=batch,
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        log_probs_and_entropy=log_probs_and_entropy,
+        sum_of_sample_mean=sum_of_sample_mean,
+    )
     if opd_loss is not None:
         loss = loss + opd_loss
 
@@ -1401,23 +1389,15 @@ def loss_function(
         # full-count denominator, leaving the final loss/grad unchanged.
 
     effective_num_tokens = torch.zeros_like(num_tokens) if is_dummy else num_tokens
-    if getattr(args, "opd_loss_mode", "opd") == "sdpo":
-        denominator_overrides = {
-            "sdpo_topk_coverage": log.pop("__sdpo_topk_coverage_denominator", None),
-            "opd_kl": log.pop("__sdpo_opd_kl_denominator", None),
-        }
-    else:
-        denominator_overrides = {}
-    if not any(value is not None for value in denominator_overrides.values()):
-        log_values = torch.tensor(
-            [
-                num_samples if not args.calculate_per_token_loss else effective_num_tokens,
-            ]
-            + list(log.values()),
-            device=logits.device,
-        )
-        if is_dummy:
-            log_values = torch.zeros_like(log_values)
+    log_values = torch.tensor(
+        [
+            num_samples if not args.calculate_per_token_loss else effective_num_tokens,
+        ]
+        + list(log.values()),
+        device=logits.device,
+    )
+    if is_dummy:
+        log_values = torch.zeros_like(log_values)
         return (
             loss,
             (effective_num_tokens if args.calculate_per_token_loss else torch.tensor(1, device=logits.device)),
@@ -1426,6 +1406,7 @@ def loss_function(
                 "values": log_values,
             },
         )
+    denominator_overrides: dict[str, torch.Tensor | None] = {}
     metric_keys = list(log.keys())
     metric_values: list[torch.Tensor] = []
     metric_denominators: list[torch.Tensor] = []

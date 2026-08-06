@@ -88,6 +88,7 @@ TEACHER_ROUTES="{\"openai/gsm8k\":\"${MODEL_DIR}/${TEXT_TEACHER_MODEL_NAME}/\",\
 
 OPD_ARGS=(
    --use-opd
+   --opd-feedback-class relax.utils.opd.feedback.OPSDFeedback
    --opd-type sglang
    --opd-kl-coef 0.3
    --opd-teacher-key data_source

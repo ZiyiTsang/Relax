@@ -69,7 +69,6 @@ def _normalize_sciknoweval_row(
             "domain": normalized_domain,
             "task_type": str(row.get("kind", "mcq")),
             "answer_key": answer,
-            "sdpo_prompt": prompt,
             "source_index": row.get("idx"),
         }
         return {"prompt": prompt, "label": _json_text(answer), "metadata": metadata}
@@ -103,7 +102,6 @@ def _normalize_sciknoweval_row(
         "task_type": str(row.get("type", "unknown")),
         "answer_key": answer,
         "choices": choices,
-        "sdpo_prompt": prompt,
     }
     return {"prompt": prompt, "label": _json_text(answer), "metadata": metadata}
 
@@ -121,7 +119,6 @@ def _normalize_tool_row(row: dict[str, Any], *, source_split: str, dataset: str)
             "source_split": source_split,
             "task_type": str(row.get("kind", "tooluse")),
             "golden_answer": golden_answer,
-            "sdpo_prompt": prompt,
             "source_index": row.get("idx"),
         }
         return {"prompt": prompt, "label": _json_text(answer), "metadata": metadata}
@@ -148,7 +145,6 @@ def _normalize_tool_row(row: dict[str, Any], *, source_split: str, dataset: str)
         "source_split": source_split,
         "task_type": "tool_call",
         "golden_answer": golden_answer,
-        "sdpo_prompt": prompt,
     }
     return {"prompt": prompt, "label": _json_text(golden_answer), "metadata": metadata}
 

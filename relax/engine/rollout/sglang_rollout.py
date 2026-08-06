@@ -82,6 +82,11 @@ class GenerateState(metaclass=SingletonMeta):
 
         # OPD manager (singleton — one OpdManager per GenerateState)
         self.opd_manager = opd.OpdManager(args) if opd.is_opd_enabled(args) else None
+        self.feedback = None
+        if self.opd_manager is not None:
+            from relax.utils.opd.feedback import load_feedback_class
+
+            self.feedback = load_feedback_class(getattr(args, "opd_feedback_class", None))()
 
         # Media-encoding thread pool for this rollout worker process, sized by
         # --encode-max-workers (falls back to $RELAX_ENCODE_MAX_WORKERS, then an
@@ -295,7 +300,9 @@ async def _encode_multimodal_inputs(multimodal_inputs: dict) -> tuple[dict[str, 
 
 
 def _validate_sdpo_sample(args: Namespace, sample: Sample | list[Sample]) -> None:
-    if getattr(args, "opd_loss_mode", "opd") != "sdpo":
+    from relax.utils.opd.opd_utils import is_sdpo_prompt_routing_enabled
+
+    if not is_sdpo_prompt_routing_enabled(args):
         return
     from relax.utils.opd.sdpo import validate_sdpo_text_only
 
@@ -690,8 +697,13 @@ async def generate_and_rm_group(
         rewards = await batched_async_rm(args, group)
         for sample, reward in zip(group, rewards, strict=False):
             sample.reward = reward
+            if state.feedback is not None:
+                state.feedback.record_reward(sample, reward)
 
         if state.opd_manager and not evaluation:
+            if state.feedback is None:
+                raise RuntimeError("OPD feedback implementation was not initialized")
+            state.feedback.prepare_teacher_prompts(group, rewards)
             await state.opd_manager.prefill(group, _encode_multimodal_inputs)
 
     return group

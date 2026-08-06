@@ -232,7 +232,6 @@ def test_opd_train_data_schema_does_not_duplicate_rollout_log_probs():
     args = Namespace(
         use_opd=True,
         opd_type="sglang",
-        opd_loss_mode="opd",
         opd_token_selection="student_sampled",
         opd_kl_coef=1.0,
         opd_loss_coef=0.0,
@@ -243,3 +242,48 @@ def test_opd_train_data_schema_does_not_duplicate_rollout_log_probs():
 
     assert fields.count("rollout_log_probs") == 1
     assert fields.count("teacher_log_probs") == 1
+
+
+@pytest.mark.parametrize("cp_rank, expected_rows", [(0, [5, 6, 7]), (1, [0, 1, 2, 3, 4])])
+def test_ordinary_topk_cp_slicing_preserves_response_rows(cp_rank: int, expected_rows: list[int]) -> None:
+    pytest.importorskip("megatron.core")
+    rows = torch.arange(8, dtype=torch.float32).unsqueeze(1).repeat(1, 3)
+    rollout_data = {
+        "total_lengths": [16],
+        "response_lengths": [8],
+        "opd_topk_token_ids": [rows.to(dtype=torch.long)],
+        "opd_topk_student_log_probs": [rows],
+        "opd_topk_teacher_log_probs": [rows + 10],
+    }
+    args = Namespace(opd_token_selection="student_topk", qkv_format="thd", allgather_cp=False)
+
+    opd_utils.slice_opd_topk_rollout_fields(
+        rollout_data,
+        args,
+        dynamic_cp_size=2,
+        dynamic_cp_rank=cp_rank,
+    )
+
+    expected = torch.tensor(expected_rows, dtype=torch.float32)
+    actual = rollout_data["opd_topk_student_log_probs"][0]
+    assert actual.shape == (len(expected_rows), 3)
+    torch.testing.assert_close(actual[:, 0], expected)
+    torch.testing.assert_close(rollout_data["opd_topk_token_ids"][0][:, 0].float(), expected)
+
+
+def test_ordinary_union_topk_cp_slicing_preserves_ragged_lengths() -> None:
+    pytest.importorskip("megatron.core")
+    rows = torch.arange(8, dtype=torch.float32).unsqueeze(1).repeat(1, 2)
+    rollout_data = {
+        "total_lengths": [16],
+        "response_lengths": [8],
+        "opd_topk_student_log_probs": [rows],
+        "opd_topk_teacher_log_probs": [rows + 10],
+        "opd_topk_ksz": [torch.arange(8, dtype=torch.long) + 1],
+    }
+    args = Namespace(opd_token_selection="union", qkv_format="thd", allgather_cp=False)
+
+    opd_utils.slice_opd_topk_rollout_fields(rollout_data, args, dynamic_cp_size=2, dynamic_cp_rank=0)
+
+    torch.testing.assert_close(rollout_data["opd_topk_student_log_probs"][0][:, 0], torch.arange(5, 8).float())
+    torch.testing.assert_close(rollout_data["opd_topk_ksz"][0], torch.arange(5, 8) + 1)
