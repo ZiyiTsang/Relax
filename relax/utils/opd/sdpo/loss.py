@@ -35,10 +35,10 @@ def compute_sdpo_topk_divergence(
     reference implementation. ``support_mask`` is only needed for padded
     support rows; it is lifted to the tail-augmented distribution by the shared
     OPD mask estimator. The teacher is a detached target; the student remains
-    differentiable. SDPO's endpoint convention is explicit: ``jsd_alpha=0`` is
-    forward KL (teacher to student), while ``jsd_alpha=1`` is reverse KL
-    (student to teacher); this is intentionally separate from ordinary OPD's
-    alpha convention.
+    differentiable. SDPO uses explicit endpoint aliases: ``jsd_alpha=0`` is
+    ``KL(teacher || student)`` and ``jsd_alpha=1`` is
+    ``KL(student || teacher)``. This is intentionally separate from ordinary
+    OPD's alpha convention.
     """
 
     if student_log_probs.shape != teacher_log_probs.shape:

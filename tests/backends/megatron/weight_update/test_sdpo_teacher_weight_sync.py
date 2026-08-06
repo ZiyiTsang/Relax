@@ -219,3 +219,101 @@ def test_torch_memory_saver_uses_cpu_weight_serialization(monkeypatch):
     assert long_lived_tensors[0]["flattened_tensor"].device.type == "cpu"
     decoded = module.MultiprocessingSerializer.deserialize(captured["serialized"][0])
     assert decoded["flattened_tensor"].device.type == "cpu"
+
+
+def test_sdpo_actor_snapshot_refreshes_before_ema_update():
+    from relax.backends.megatron.actor import MegatronTrainRayActor
+
+    events = []
+
+    class _Backuper:
+        def backup(self, tag):
+            events.append(("backup", tag))
+
+        def ema(self, **kwargs):
+            events.append(("ema", kwargs))
+
+    actor = MegatronTrainRayActor.__new__(MegatronTrainRayActor)
+    actor.weights_backuper = _Backuper()
+    actor._sdpo_teacher_ema_enabled = True
+    actor.args = type("Args", (), {"sdpo_teacher_ema_alpha": 0.01})()
+
+    actor._backup_actor_and_update_sdpo_teacher_ema()
+
+    assert events == [
+        ("backup", "actor"),
+        (
+            "ema",
+            {
+                "source_tag": "actor",
+                "target_tag": "actor_ema",
+                "alpha": 0.01,
+            },
+        ),
+    ]
+
+
+def test_actor_snapshot_refresh_keeps_ordinary_opd_without_ema():
+    from relax.backends.megatron.actor import MegatronTrainRayActor
+
+    events = []
+
+    class _Backuper:
+        def backup(self, tag):
+            events.append(("backup", tag))
+
+        def ema(self, **kwargs):
+            events.append(("ema", kwargs))
+
+    actor = MegatronTrainRayActor.__new__(MegatronTrainRayActor)
+    actor.weights_backuper = _Backuper()
+    actor._sdpo_teacher_ema_enabled = False
+
+    actor._backup_actor_and_update_sdpo_teacher_ema()
+
+    assert events == [("backup", "actor")]
+
+
+def test_sdpo_teacher_publish_hook_runs_after_student_publish(monkeypatch):
+    from relax.backends.megatron import actor as actor_module
+    from relax.backends.megatron.actor import MegatronTrainRayActor
+
+    events = []
+
+    class _RemoteMethod:
+        def remote(self):
+            events.append("get_rollout_engines")
+            return ([], None, 0, [], [])
+
+    class _RolloutManager:
+        get_rollout_engines_and_lock = _RemoteMethod()
+
+    class _Updater:
+        def update_weights(self):
+            events.append("student_publish")
+
+    actor = MegatronTrainRayActor.__new__(MegatronTrainRayActor)
+    actor.args = type(
+        "Args",
+        (),
+        {
+            "debug_train_only": False,
+            "debug_rollout_only": False,
+            "offload_train": False,
+            "offload_rollout": False,
+            "use_fault_tolerance": False,
+            "ci_test": False,
+            "keep_old_actor": False,
+        },
+    )()
+    actor.rollout_manager = _RolloutManager()
+    actor.weight_updater = _Updater()
+    actor._torch_memory_saver_enabled = False
+    actor.genrm_manager = None
+    actor._publish_sdpo_teacher_ema = lambda: events.append("teacher_publish")
+    monkeypatch.setattr(actor_module.ray, "get", lambda value: value)
+    monkeypatch.setattr(actor_module, "print_memory", lambda *args, **kwargs: None)
+
+    actor.update_weights(publish_sdpo_teacher_ema=True)
+
+    assert events == ["get_rollout_engines", "student_publish", "teacher_publish"]

@@ -615,7 +615,11 @@ def add_opd_arguments(parser: Any) -> Any:
         "--opd-jsd-alpha",
         type=float,
         default=0.5,
-        help="Mixture coefficient for --opd-kl-type=jsd. 0.0 reduces to reverse_kl, 1.0 to forward_kl.",
+        help=(
+            "Mixture coefficient for --opd-kl-type=jsd. Ordinary OPD uses alpha=0 for "
+            "KL(student||teacher) and alpha=1 for KL(teacher||student); Relax-SDPO uses "
+            "its separate criterion with these endpoints reversed."
+        ),
     )
     parser.add_argument(
         "--opd-norm-mode",
@@ -1232,6 +1236,9 @@ def compute_opd_kl(
     positions are set to ``-inf`` after clamp (so ``logsumexp`` ignores them)
     and their contributions are zeroed before ``.sum(dim=-1)``. ``None`` (topk
     path with fixed K) skips all masking — behavior unchanged.
+
+    For ordinary OPD, JSD ``alpha=0`` and ``alpha=1`` are explicit endpoint
+    aliases for ``KL(student || teacher)`` and ``KL(teacher || student)``.
     """
     s = student_log_probs.float()
     t = teacher_log_probs.float()
@@ -1324,10 +1331,11 @@ def compute_opd_kl_topk(
     topk path — behavior unchanged.
 
     This is the ordinary OPD convention: ``reverse_kl`` maps to the student
-    expectation and ``forward_kl`` maps to the teacher expectation. In
-    particular, ``jsd_alpha=0`` is the reverse-KL endpoint and
-    ``jsd_alpha=1`` is the forward-KL endpoint. SDPO uses a separate criterion
-    because its reference endpoint aliases are intentionally reversed.
+    expectation and ``forward_kl`` maps to the teacher expectation. The JSD
+    boundary values are explicit endpoint aliases: ``jsd_alpha=0`` is
+    ``KL(student || teacher)`` and ``jsd_alpha=1`` is
+    ``KL(teacher || student)``. SDPO uses a separate criterion because its
+    reference endpoint aliases are intentionally reversed.
     """
     if kl_type in ("reverse_kl", "forward_kl", "jsd"):
         if kl_type == "reverse_kl":

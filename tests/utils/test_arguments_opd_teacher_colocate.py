@@ -173,6 +173,17 @@ def test_sdpo_loss_mode_is_parsed_and_validated(arguments_module):
     arguments_module.slime_validate_args(args)
 
 
+def test_opd_jsd_help_distinguishes_ordinary_opd_and_sdpo(arguments_module):
+    arguments_module.RouterArgs = SimpleNamespace(add_cli_args=lambda parser, **_kwargs: parser)
+    parser = argparse.ArgumentParser()
+    arguments_module.get_slime_extra_args_provider()(parser)
+
+    help_text = next(action.help for action in parser._actions if action.dest == "opd_jsd_alpha")
+
+    assert "Ordinary OPD uses alpha=0 for KL(student||teacher)" in help_text
+    assert "Relax-SDPO uses its separate criterion with these endpoints reversed" in help_text
+
+
 def _configure_sdpo_ema(args):
     args.opd_loss_mode = "sdpo"
     args.opd_token_selection = "student_topk"

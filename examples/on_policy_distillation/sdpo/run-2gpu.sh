@@ -75,7 +75,7 @@ experiment_name="${EXPERIMENT_NAME:-${repo}-${mode}-2gpu}"
 export PYTHONPATH="${repo_root}${megatron:+:${megatron}}"
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 export RELAX_OPD_PER_POS_TOKEN_IDS="${RELAX_OPD_PER_POS_TOKEN_IDS:-1}"
-export RELAX_PROPAGATE_ENV_VARS="${RELAX_PROPAGATE_ENV_VARS:+${RELAX_PROPAGATE_ENV_VARS},}CUDA_DEVICE_MAX_CONNECTIONS,RELAX_OPD_PER_POS_TOKEN_IDS"
+export RELAX_PROPAGATE_ENV_VARS="${RELAX_PROPAGATE_ENV_VARS:+${RELAX_PROPAGATE_ENV_VARS},}CUDA_DEVICE_MAX_CONNECTIONS,RELAX_OPD_PER_POS_TOKEN_IDS,WANDB_DIR"
 
 resource_json="{\"actor\": [1, ${actor_gpus}], \"rollout\": [1, ${rollout_gpus}]"
 if [[ "${mode}" == "opd" || "${mode}" == "sdpo" ]]; then
@@ -159,7 +159,8 @@ case "${mode}" in
         ;;
     opd)
         command+=(
-            --rm-type dapo
+            --group-rm
+            --custom-rm-path examples.on_policy_distillation.sdpo.reward.score
             --advantage-estimator grpo
             --eps-clip 0.2
             --eps-clip-high 0.28
