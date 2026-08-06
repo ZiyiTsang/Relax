@@ -29,6 +29,25 @@ class TeacherPrefillInput:
         return max(self.prompt_length - 1, 0)
 
 
+def _normalize_tokenizer_ids(encoded: Any) -> list[int]:
+    """Convert tokenizer outputs to a JSON-safe flat list of token ids."""
+    if isinstance(encoded, dict):
+        encoded = encoded.get("input_ids", encoded)
+    token_ids = getattr(encoded, "input_ids", None)
+    if token_ids is None:
+        token_ids = getattr(encoded, "ids", encoded)
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+    if isinstance(token_ids, (list, tuple)) and token_ids and isinstance(token_ids[0], (list, tuple)):
+        if len(token_ids) != 1:
+            raise ValueError("Teacher tokenizer returned multiple input sequences")
+        token_ids = token_ids[0]
+    try:
+        return [int(token_id) for token_id in token_ids]
+    except (TypeError, ValueError) as exc:
+        raise TypeError("Teacher tokenizer output must contain integer token ids") from exc
+
+
 def get_original_response_ids(sample: "Sample", response_length: int) -> list[int]:
     if response_length < 0:
         raise ValueError(f"response_length must be non-negative, got {response_length}")
@@ -120,6 +139,25 @@ class TeacherPrefillBuilder:
             )
         return prompt_length
 
+    @staticmethod
+    def _chat_template_ids(tokenizer: Any, prompt: list[dict[str, str]]) -> list[int]:
+        try:
+            encoded = tokenizer.apply_chat_template(
+                prompt,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=False,
+            )
+        except TypeError as exc:
+            if "return_dict" not in str(exc):
+                raise
+            encoded = tokenizer.apply_chat_template(
+                prompt,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+        return _normalize_tokenizer_ids(encoded)
+
     async def _prepare_sdpo(self, args, sample: "Sample") -> None:
         from relax.utils.opd.sdpo import validate_sdpo_text_only
 
@@ -135,11 +173,8 @@ class TeacherPrefillBuilder:
         if isinstance(sample.teacher_prompt, str):
             teacher_prompt_ids = tokenizer.encode(sample.teacher_prompt, add_special_tokens=False)
         else:
-            teacher_prompt_ids = tokenizer.apply_chat_template(
-                sample.teacher_prompt,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
+            teacher_prompt_ids = self._chat_template_ids(tokenizer, sample.teacher_prompt)
+        teacher_prompt_ids = _normalize_tokenizer_ids(teacher_prompt_ids)
         max_prompt_length = getattr(args, "rollout_max_prompt_len", None)
         if max_prompt_length is not None and int(max_prompt_length) > 0:
             teacher_prompt_ids = list(teacher_prompt_ids[: int(max_prompt_length)])
@@ -196,11 +231,8 @@ class TeacherPrefillBuilder:
         elif isinstance(teacher_prompt_for_tokenize, str):
             teacher_prompt_ids = state.tokenizer.encode(teacher_prompt_for_tokenize, add_special_tokens=False)
         else:
-            teacher_prompt_ids = state.tokenizer.apply_chat_template(
-                teacher_prompt_for_tokenize,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
+            teacher_prompt_ids = self._chat_template_ids(state.tokenizer, teacher_prompt_for_tokenize)
+        teacher_prompt_ids = _normalize_tokenizer_ids(teacher_prompt_ids)
 
         response_ids = get_original_response_ids(sample, int(sample.response_length))
         sample.teacher_tokens = list(teacher_prompt_ids) + response_ids

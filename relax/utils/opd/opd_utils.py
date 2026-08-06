@@ -85,6 +85,14 @@ def is_managed_opd_teacher_colocate(args: Any) -> bool:
     )
 
 
+def is_sdpo_teacher_ema_enabled(args: Any) -> bool:
+    return (
+        getattr(args, "use_opd", False)
+        and getattr(args, "opd_loss_mode", "opd") == "sdpo"
+        and getattr(args, "sdpo_teacher_update_mode", "static") == "ema"
+    )
+
+
 def _mirror_teacher_sglang_server_args(parser: Any) -> None:
     import argparse
 
@@ -491,6 +499,19 @@ def add_opd_arguments(parser: Any) -> Any:
         default="opd",
         help="Select the ordinary OPD criterion or the static-teacher SDPO criterion.",
     )
+    parser.add_argument(
+        "--sdpo-teacher-update-mode",
+        type=str,
+        choices=("static", "ema"),
+        default="static",
+        help="SDPO teacher update mode. 'static' keeps the initial teacher; 'ema' updates it after each actor step.",
+    )
+    parser.add_argument(
+        "--sdpo-teacher-ema-alpha",
+        type=float,
+        default=0.01,
+        help="EMA mixing rate for the new actor weights in SDPO EMA mode. Must be in (0, 1].",
+    )
 
     parser.add_argument(
         "--opd-only-reward",
@@ -594,7 +615,11 @@ def add_opd_arguments(parser: Any) -> Any:
         "--opd-jsd-alpha",
         type=float,
         default=0.5,
-        help="Mixture coefficient for --opd-kl-type=jsd. 0.0 reduces to reverse_kl, 1.0 to forward_kl.",
+        help=(
+            "Mixture coefficient for --opd-kl-type=jsd. Ordinary OPD uses alpha=0 for "
+            "KL(student||teacher) and alpha=1 for KL(teacher||student); Relax-SDPO uses "
+            "its separate criterion with these endpoints reversed."
+        ),
     )
     parser.add_argument(
         "--opd-norm-mode",
@@ -680,8 +705,12 @@ def add_opd_arguments(parser: Any) -> Any:
 
 def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> None:
     if is_sft:
+        if getattr(args, "sdpo_teacher_update_mode", "static") == "ema":
+            raise ValueError("SDPO EMA is only available for on-policy RL training, not SFT.")
         return
 
+    if getattr(args, "sdpo_teacher_update_mode", "static") == "ema" and not getattr(args, "use_opd", False):
+        raise ValueError("--sdpo-teacher-update-mode=ema requires --use-opd.")
     if not getattr(args, "use_opd", False):
         return
     if args.opd_type is None:
@@ -701,6 +730,20 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             )
 
     loss_mode = getattr(args, "opd_loss_mode", "opd")
+    teacher_update_mode = getattr(args, "sdpo_teacher_update_mode", "static")
+    if teacher_update_mode not in ("static", "ema"):
+        raise ValueError(f"--sdpo-teacher-update-mode must be 'static' or 'ema', got {teacher_update_mode!r}.")
+    if teacher_update_mode == "ema" and loss_mode != "sdpo":
+        raise ValueError("--sdpo-teacher-update-mode=ema requires --opd-loss-mode=sdpo.")
+    if teacher_update_mode == "ema":
+        try:
+            valid_ema_alpha = 0 < float(getattr(args, "sdpo_teacher_ema_alpha", 0.01)) <= 1
+        except (TypeError, ValueError):
+            valid_ema_alpha = False
+        if not valid_ema_alpha:
+            raise ValueError(
+                f"--sdpo-teacher-ema-alpha must be in (0, 1], got {getattr(args, 'sdpo_teacher_ema_alpha', None)}."
+            )
     if loss_mode == "sdpo":
         if args.opd_type != "sglang":
             raise ValueError("--opd-loss-mode=sdpo currently requires --opd-type=sglang.")
@@ -721,6 +764,36 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             for field_name in ("opd_teacher_image_key", "opd_teacher_video_key", "opd_teacher_audio_key")
         ):
             raise ValueError("--opd-loss-mode=sdpo only supports text inputs; multimodal fields are not supported.")
+        if teacher_update_mode == "ema":
+            if getattr(args, "teacher_hf_checkpoint", None) is None:
+                raise ValueError(
+                    "--sdpo-teacher-update-mode=ema requires a managed single teacher via --teacher-hf-checkpoint."
+                )
+            if getattr(args, "opd_teacher_routes", None) is not None:
+                raise ValueError("SDPO EMA does not support --opd-teacher-routes/MOPD.")
+            if getattr(args, "opd_teacher_url", None) is not None:
+                raise ValueError("SDPO EMA does not support an external --opd-teacher-url teacher.")
+            if not getattr(args, "colocate", False):
+                raise ValueError("SDPO EMA currently requires --colocate with a managed teacher.")
+            if getattr(args, "hybrid", False):
+                raise ValueError("SDPO EMA does not support --hybrid mode.")
+            if getattr(args, "fully_async", False):
+                raise ValueError("SDPO EMA does not support fully asynchronous training.")
+            if getattr(args, "train_backend", "megatron") != "megatron":
+                raise ValueError("SDPO EMA currently requires the Megatron training backend.")
+            resource = getattr(args, "resource", None)
+            if not isinstance(resource, dict) or "teacher" not in resource:
+                raise ValueError("SDPO EMA requires a managed teacher resource entry.")
+            if not is_managed_opd_teacher_colocate(args):
+                raise ValueError(
+                    "SDPO EMA requires a single Relax-managed colocated SGLang teacher with actor and rollout resources."
+                )
+            if not getattr(args, "enable_weights_backuper", False):
+                raise ValueError("SDPO EMA requires --enable-weights-backuper.")
+            from relax.utils.megatron_peft_utils import is_lora_enabled
+
+            if is_lora_enabled(args):
+                raise ValueError("SDPO EMA currently supports full-model training only; LoRA is not supported.")
 
     kl_type = args.opd_kl_type
     if token_selection == "student_sampled" and kl_type not in ("reverse_kl", "low_var_kl"):
@@ -1163,6 +1236,9 @@ def compute_opd_kl(
     positions are set to ``-inf`` after clamp (so ``logsumexp`` ignores them)
     and their contributions are zeroed before ``.sum(dim=-1)``. ``None`` (topk
     path with fixed K) skips all masking — behavior unchanged.
+
+    For ordinary OPD, JSD ``alpha=0`` and ``alpha=1`` are explicit endpoint
+    aliases for ``KL(student || teacher)`` and ``KL(teacher || student)``.
     """
     s = student_log_probs.float()
     t = teacher_log_probs.float()
@@ -1255,10 +1331,11 @@ def compute_opd_kl_topk(
     topk path — behavior unchanged.
 
     This is the ordinary OPD convention: ``reverse_kl`` maps to the student
-    expectation and ``forward_kl`` maps to the teacher expectation. In
-    particular, ``jsd_alpha=0`` is the reverse-KL endpoint and
-    ``jsd_alpha=1`` is the forward-KL endpoint. SDPO uses a separate criterion
-    because its reference endpoint aliases are intentionally reversed.
+    expectation and ``forward_kl`` maps to the teacher expectation. The JSD
+    boundary values are explicit endpoint aliases: ``jsd_alpha=0`` is
+    ``KL(student || teacher)`` and ``jsd_alpha=1`` is
+    ``KL(teacher || student)``. SDPO uses a separate criterion because its
+    reference endpoint aliases are intentionally reversed.
     """
     if kl_type in ("reverse_kl", "forward_kl", "jsd"):
         if kl_type == "reverse_kl":

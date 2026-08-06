@@ -1,8 +1,11 @@
 # Relax-SDPO 示例
 
 本目录提供 GRPO/Relax-SDPO 的启动脚本，以及 SciKnowEval L3 和工具调用数据的离线准备
-入口。Relax-SDPO 使用独立的静态 teacher checkpoint；student 和 teacher 可以先使用同一
-checkpoint 创建两个独立实例。
+入口。Relax-SDPO 默认使用独立的静态 teacher checkpoint；也可以显式启用 EMA teacher。
+EMA 不创建新的训练 actor，而是在已有 actor 内维护 `actor_ema` CPU shadow，并在每个
+actor training call 后同步到 managed SGLang teacher。
+EMA teacher 启动时先使用 `TEACHER_MODEL_PATH` 作为可启动的 bootstrap，随后会在首个
+rollout 前接收实际 actor（包括 resume 后 actor）的完整 `actor_ema` 权重。
 
 ## 模型与数据
 
@@ -84,6 +87,17 @@ export PYTHONPATH="${MEGATRON}:xxx/Research/relax-worktree"
 MODE=grpo bash examples/on_policy_distillation/sdpo/run-2gpu.sh
 MODE=sdpo bash examples/on_policy_distillation/sdpo/run-2gpu.sh
 ```
+
+启用 EMA teacher 时，在 SDPO 启动参数中增加：
+
+```text
+--sdpo-teacher-update-mode ema
+--sdpo-teacher-ema-alpha 0.01
+```
+
+EMA 发布间隔固定为 1；当前版本尚未加入 optimizer overflow/skip-step/NaN 成功门控。
+EMA 仅支持 managed、single-teacher、colocate、full-model 的文本 SDPO；外部 teacher URL、
+MOPD routes、hybrid/fully-async 和 LoRA 会被参数校验拒绝。
 
 同一个入口也可用 `REPO=main` 运行 main checkout；此时设置
 `MAIN_REPO_ROOT`、`MAIN_RELAX_PYTHON` 和 `MAIN_MEGATRON`。

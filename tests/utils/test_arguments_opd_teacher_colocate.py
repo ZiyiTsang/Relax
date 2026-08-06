@@ -161,6 +161,8 @@ def test_sdpo_loss_mode_is_parsed_and_validated(arguments_module):
     parsed = parser.parse_args(["--opd-loss-mode", "sdpo"])
 
     assert parsed.opd_loss_mode == "sdpo"
+    assert parsed.sdpo_teacher_update_mode == "static"
+    assert parsed.sdpo_teacher_ema_alpha == 0.01
 
     args = _opd_args()
     args.opd_loss_mode = "sdpo"
@@ -169,6 +171,87 @@ def test_sdpo_loss_mode_is_parsed_and_validated(arguments_module):
     args.opd_kl_coef = 0.0
     args.opd_loss_coef = 1.0
     arguments_module.slime_validate_args(args)
+
+
+def test_opd_jsd_help_distinguishes_ordinary_opd_and_sdpo(arguments_module):
+    arguments_module.RouterArgs = SimpleNamespace(add_cli_args=lambda parser, **_kwargs: parser)
+    parser = argparse.ArgumentParser()
+    arguments_module.get_slime_extra_args_provider()(parser)
+
+    help_text = next(action.help for action in parser._actions if action.dest == "opd_jsd_alpha")
+
+    assert "Ordinary OPD uses alpha=0 for KL(student||teacher)" in help_text
+    assert "Relax-SDPO uses its separate criterion with these endpoints reversed" in help_text
+
+
+def _configure_sdpo_ema(args):
+    args.opd_loss_mode = "sdpo"
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.opd_kl_coef = 0.0
+    args.opd_loss_coef = 1.0
+    args.colocate = True
+    args.sdpo_teacher_update_mode = "ema"
+    args.sdpo_teacher_ema_alpha = 0.01
+    args.enable_weights_backuper = True
+    return args
+
+
+def test_sdpo_ema_accepts_managed_colocated_teacher(arguments_module):
+    args = _configure_sdpo_ema(_opd_args())
+
+    arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_ema_rejects_when_opd_is_disabled(arguments_module):
+    args = _configure_sdpo_ema(_opd_args())
+    args.use_opd = False
+
+    with pytest.raises(ValueError, match="requires --use-opd"):
+        arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_ema_rejects_external_teacher(arguments_module):
+    args = _configure_sdpo_ema(_opd_args())
+    args.teacher_hf_checkpoint = None
+    args.opd_teacher_url = "http://teacher/generate"
+
+    with pytest.raises(ValueError, match="managed single teacher"):
+        arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_ema_rejects_mopd_routes(arguments_module):
+    args = _configure_sdpo_ema(_opd_args())
+    args.opd_teacher_routes = '{"math":"/teacher"}'
+
+    with pytest.raises(ValueError, match="MOPD"):
+        arguments_module.slime_validate_args(args)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("fully_async", True, "fully asynchronous"),
+        ("hybrid", True, "hybrid"),
+        ("enable_weights_backuper", False, "enable-weights-backuper"),
+        ("lora_rank", 8, "LoRA"),
+    ],
+)
+def test_sdpo_ema_rejects_unsupported_execution_modes(arguments_module, field_name, value, message):
+    args = _configure_sdpo_ema(_opd_args())
+    setattr(args, field_name, value)
+
+    with pytest.raises(ValueError, match=message):
+        arguments_module.slime_validate_args(args)
+
+
+@pytest.mark.parametrize("alpha", [0.0, -0.1, 1.1])
+def test_sdpo_ema_rejects_invalid_alpha(arguments_module, alpha):
+    args = _configure_sdpo_ema(_opd_args())
+    args.sdpo_teacher_ema_alpha = alpha
+
+    with pytest.raises(ValueError, match="sdpo-teacher-ema-alpha"):
+        arguments_module.slime_validate_args(args)
 
 
 def test_sdpo_loss_mode_rejects_non_student_topk(arguments_module):
