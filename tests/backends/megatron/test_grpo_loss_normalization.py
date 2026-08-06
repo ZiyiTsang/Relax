@@ -200,24 +200,6 @@ def test_seq_mean_token_sum_norm_requires_positive_scale_factor(cp_utils_module)
         )
 
 
-def test_seq_mean_token_sum_norm_cp_shards_sum_to_single_rank_value(cp_utils_module):
-    import torch
-
-    kwargs = {
-        "total_lengths": [6],
-        "response_lengths": [4],
-        "loss_masks": [torch.ones(4)],
-        "scale_factor": 8,
-        "dynamic_cp_size": 2,
-    }
-    rank_zero = cp_utils_module.get_sequence_loss_aggregator("seq-mean-token-sum-norm", dynamic_cp_rank=0, **kwargs)
-    rank_one = cp_utils_module.get_sequence_loss_aggregator("seq-mean-token-sum-norm", dynamic_cp_rank=1, **kwargs)
-
-    cp_sum = rank_zero(torch.tensor([1.0])) + rank_one(torch.tensor([2.0, 3.0, 4.0]))
-
-    assert torch.isclose(cp_sum, torch.tensor(10.0 / 8.0))
-
-
 def test_per_token_finalizer_scale_recovers_fixed_dr_grpo_denominator(cp_utils_module):
     import torch
 
@@ -347,12 +329,26 @@ def test_padding_kwargs_preserve_fixed_sum_result(cp_utils_module):
         "seq-mean-token-sum-norm", dynamic_cp_rank=1, qkv_format="bshd", max_seq_lens=[8], **kwargs
     )
 
-    x_zero = torch.tensor([1.0])
-    x_one = torch.tensor([2.0, 3.0, 4.0])
+    x_zero = torch.tensor([1.0], requires_grad=True)
+    x_one = torch.tensor([2.0, 3.0, 4.0], requires_grad=True)
 
     plain = base_zero(x_zero) + base_one(x_one)
-    assert torch.equal(plain, padded_zero(x_zero) + padded_one(x_one))
-    assert torch.equal(plain, bshd_zero(x_zero) + bshd_one(x_one))
+    plain.backward()
+    plain_grad = (x_zero.grad.clone(), x_one.grad.clone())
+    x_zero.grad = None
+    x_one.grad = None
+    padded = padded_zero(x_zero) + padded_one(x_one)
+    padded.backward()
+    assert torch.equal(plain, padded)
+    assert torch.equal(x_zero.grad, plain_grad[0])
+    assert torch.equal(x_one.grad, plain_grad[1])
+    x_zero.grad = None
+    x_one.grad = None
+    bshd = bshd_zero(x_zero) + bshd_one(x_one)
+    bshd.backward()
+    assert torch.equal(plain, bshd)
+    assert torch.equal(x_zero.grad, plain_grad[0])
+    assert torch.equal(x_one.grad, plain_grad[1])
     assert torch.isclose(plain, torch.tensor(10.0 / 8.0))
 
 
@@ -362,7 +358,8 @@ def test_sum_norm_reweights_short_vs_long_responses(cp_utils_module):
     total_lengths = [8, 512]
     response_lengths = [8, 512]
     loss_masks = [torch.ones(8), torch.ones(512)]
-    values = torch.ones(520)
+    seq_values = torch.ones(520, requires_grad=True)
+    sum_norm_values = torch.ones(520, requires_grad=True)
 
     seq_mean = cp_utils_module.get_sequence_loss_aggregator(
         "seq-mean-token-mean", total_lengths, response_lengths, loss_masks, dynamic_cp_size=1
@@ -376,8 +373,10 @@ def test_sum_norm_reweights_short_vs_long_responses(cp_utils_module):
         dynamic_cp_size=1,
     )
 
-    seq_mean_loss = seq_mean(values)
-    sum_norm_loss = sum_norm(values)
+    seq_mean_loss = seq_mean(seq_values)
+    sum_norm_loss = sum_norm(sum_norm_values)
+    seq_mean_loss.backward()
+    sum_norm_loss.backward()
 
     # Per-response mean is 1.0, so seq-mean weights the two responses equally (1:1).
     assert torch.isclose(seq_mean_loss, torch.tensor(2.0))
@@ -389,3 +388,8 @@ def test_sum_norm_reweights_short_vs_long_responses(cp_utils_module):
     sum_norm_long_share = torch.tensor(512.0 / 8.0) / sum_norm_loss
     assert torch.isclose(seq_mean_long_share, torch.tensor(0.5))
     assert sum_norm_long_share > seq_mean_long_share
+    assert torch.equal(seq_values.grad[:8], torch.full((8,), 1.0 / 8.0))
+    assert torch.equal(seq_values.grad[8:], torch.full((512,), 1.0 / 512.0))
+    assert torch.equal(sum_norm_values.grad, torch.full((520,), 1.0 / 8.0))
+    assert seq_values.grad[:8].sum() == seq_values.grad[8:].sum()
+    assert sum_norm_values.grad[:8].sum() < sum_norm_values.grad[8:].sum()
