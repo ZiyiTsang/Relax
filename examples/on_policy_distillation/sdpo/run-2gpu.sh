@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
+export PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 export MEGATRON="${MEGATRON:-}"
 export RELAX_PYTHON="${RELAX_PYTHON:-python3}"
 export PYTHONPATH="${PROJECT_ROOT}${MEGATRON:+:${MEGATRON}}"
