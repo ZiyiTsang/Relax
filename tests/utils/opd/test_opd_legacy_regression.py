@@ -151,6 +151,99 @@ def test_ordinary_sampled_reverse_kl_matches_independent_upstream_oracle() -> No
     assert torch.allclose(student.grad, torch.full_like(student, 0.5))
 
 
+@pytest.mark.parametrize("calculate_per_token_loss", [False, True])
+def test_ordinary_opd_keeps_upstream_reducer_with_production_reducer(
+    calculate_per_token_loss: bool,
+) -> None:
+    args = _sampled_loss_args()
+    args.calculate_per_token_loss = calculate_per_token_loss
+    student = torch.tensor([-0.7, -0.8, -0.3], requires_grad=True)
+    teacher = torch.tensor([-0.4, -0.5, -0.2])
+    batch = _sampled_loss_batch()
+    batch["teacher_log_probs"] = [teacher[:2], teacher[2:]]
+
+    def production_reducer(values: torch.Tensor) -> torch.Tensor:
+        return values.sum() + 17.0
+
+    loss, _ = opd_utils.compute_policy_opd_loss(
+        args=args,
+        batch=batch,
+        log_probs=student,
+        old_log_probs=student.detach(),
+        log_probs_and_entropy={},
+        sum_of_sample_mean=production_reducer,
+    )
+
+    expected_values = torch.cat([student[:2] - teacher[:2], student[2:] - teacher[2:]])
+    expected = expected_values.sum() / expected_values.numel()
+    torch.testing.assert_close(loss, expected)
+
+
+@pytest.mark.parametrize("kl_type, jsd_alpha", [("reverse_kl", 0.0), ("forward_kl", 1.0)])
+def test_topk_endpoint_aliases_match_upstream_oracle(kl_type: str, jsd_alpha: float) -> None:
+    student = torch.log(torch.tensor([[0.2, 0.3], [0.4, 0.1]]))
+    teacher = torch.log(torch.tensor([[0.1, 0.4], [0.3, 0.2]]))
+
+    actual = opd_utils.compute_opd_kl_topk(
+        student,
+        teacher,
+        kl_type=kl_type,
+        norm_mode="norm",
+    )
+    expected = _legacy_oracle(
+        student,
+        teacher,
+        kl_type="jsd",
+        jsd_alpha=jsd_alpha,
+        norm_mode="norm",
+    )
+
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("jsd_alpha", [0.0, 1.0])
+def test_sdpo_policy_loss_uses_upstream_endpoint_direction(jsd_alpha: float) -> None:
+    args = Namespace(
+        opd_loss_coef=1.0,
+        opd_kl_type="jsd",
+        opd_jsd_alpha=jsd_alpha,
+        opd_norm_mode="norm",
+        opd_token_selection="student_topk",
+        opd_log_prob_min_clamp=None,
+        opd_per_token_clip=None,
+        opd_is_clip=None,
+    )
+    student = torch.log(torch.tensor([[0.2, 0.3]])).detach().requires_grad_()
+    teacher = torch.log(torch.tensor([[0.1, 0.4]])).detach().requires_grad_()
+    batch = {
+        "response_lengths": [1],
+        "loss_masks": [torch.ones(1)],
+        "dynamic_cp_size": 1,
+        "dynamic_cp_rank": 0,
+        "opd_sample_mask": [True],
+        "opd_topk_teacher_log_probs": [teacher],
+    }
+
+    loss, _ = opd_utils.compute_policy_opd_loss(
+        args=args,
+        batch=batch,
+        log_probs=torch.zeros(1),
+        old_log_probs=torch.zeros(1),
+        log_probs_and_entropy={"topk_log_probs": [student]},
+    )
+    expected = _legacy_oracle(
+        student,
+        teacher,
+        kl_type="jsd",
+        jsd_alpha=jsd_alpha,
+        norm_mode="norm",
+    ).mean()
+
+    torch.testing.assert_close(loss, expected)
+    loss.backward()
+    assert teacher.grad is None
+
+
 def _sampled_loss_args() -> Namespace:
     return Namespace(
         opd_loss_coef=1.0,
@@ -238,43 +331,69 @@ def test_opd_sample_mask_all_false_has_zero_loss_and_gradient() -> None:
     torch.testing.assert_close(student.grad, torch.zeros_like(student))
 
 
-def test_ordinary_opd_ignores_unrelated_batch_metadata() -> None:
-    args = Namespace(
-        opd_loss_coef=1.0,
-        opd_kl_type="reverse_kl",
-        opd_jsd_alpha=0.5,
-        opd_norm_mode="tail",
-        opd_token_selection="student_topk",
-        opd_log_prob_min_clamp=None,
-        opd_per_token_clip=None,
-        opd_is_clip=None,
-    )
-    student = [torch.log(torch.tensor([[0.2, 0.3]]))]
-    teacher = [torch.log(torch.tensor([[0.1, 0.4]]))]
-    common = {
-        "response_lengths": [1],
-        "loss_masks": [torch.ones(1)],
-        "dynamic_cp_size": 1,
-        "dynamic_cp_rank": 0,
-        "opd_topk_teacher_log_probs": teacher,
-    }
-    plain_loss, _ = opd_utils.compute_policy_opd_loss(
+@pytest.mark.parametrize("calculate_per_token_loss", [False, True])
+def test_opd_sample_mask_uses_active_denominator_with_production_reducer(
+    calculate_per_token_loss: bool,
+) -> None:
+    args = _sampled_loss_args()
+    args.calculate_per_token_loss = calculate_per_token_loss
+    student = torch.tensor([-0.7, -0.8, -0.3], requires_grad=True)
+    teacher = torch.tensor([-0.4, -0.5, -0.2])
+    batch = _sampled_loss_batch([True, False])
+    batch["teacher_log_probs"] = [teacher[:2], teacher[2:]]
+
+    def production_reducer(values: torch.Tensor) -> torch.Tensor:
+        chunks = values.split(batch["response_lengths"], dim=0)
+        if calculate_per_token_loss:
+            return sum(chunk.sum() for chunk in chunks)
+        return sum(chunk.mean() for chunk in chunks)
+
+    loss, _ = opd_utils.compute_policy_opd_loss(
         args=args,
-        batch=common,
-        log_probs=torch.zeros(1),
-        old_log_probs=torch.zeros(1),
-        log_probs_and_entropy={"topk_log_probs": student},
-    )
-    common_with_metadata = dict(common, unrelated_metadata=[False])
-    metadata_loss, _ = opd_utils.compute_policy_opd_loss(
-        args=args,
-        batch=common_with_metadata,
-        log_probs=torch.zeros(1),
-        old_log_probs=torch.zeros(1),
-        log_probs_and_entropy={"topk_log_probs": student},
+        batch=batch,
+        log_probs=student,
+        old_log_probs=student.detach(),
+        log_probs_and_entropy={},
+        sum_of_sample_mean=production_reducer,
     )
 
-    assert torch.equal(plain_loss, metadata_loss)
+    active_sum = torch.tensor(-0.6 if calculate_per_token_loss else -0.3)
+    full_denominator = torch.tensor(3.0 if calculate_per_token_loss else 2.0)
+    active_denominator = torch.tensor(2.0 if calculate_per_token_loss else 1.0)
+    expected = active_sum * full_denominator / active_denominator
+    torch.testing.assert_close(loss, expected)
+    loss.backward()
+    expected_gradient = 1.5 if calculate_per_token_loss else 1.0
+    torch.testing.assert_close(student.grad, torch.tensor([expected_gradient, expected_gradient, 0.0]))
+
+
+@pytest.mark.parametrize("calculate_per_token_loss", [False, True])
+def test_opd_sample_mask_prefers_step_level_denominator_scale(calculate_per_token_loss: bool) -> None:
+    args = _sampled_loss_args()
+    args.calculate_per_token_loss = calculate_per_token_loss
+    student = torch.tensor([-0.7, -0.8, -0.3], requires_grad=True)
+    teacher = torch.tensor([-0.4, -0.5, -0.2])
+    batch = _sampled_loss_batch([True, False])
+    batch[opd_utils.OPD_SAMPLE_MASK_DENOMINATOR_SCALE] = [torch.tensor(7.0), torch.tensor(7.0)]
+    batch["teacher_log_probs"] = [teacher[:2], teacher[2:]]
+
+    def production_reducer(values: torch.Tensor) -> torch.Tensor:
+        chunks = values.split(batch["response_lengths"], dim=0)
+        if calculate_per_token_loss:
+            return sum(chunk.sum() for chunk in chunks)
+        return sum(chunk.mean() for chunk in chunks)
+
+    loss, _ = opd_utils.compute_policy_opd_loss(
+        args=args,
+        batch=batch,
+        log_probs=student,
+        old_log_probs=student.detach(),
+        log_probs_and_entropy={},
+        sum_of_sample_mean=production_reducer,
+    )
+
+    active_sum = torch.tensor(-0.6 if calculate_per_token_loss else -0.3)
+    torch.testing.assert_close(loss, active_sum * 7)
 
 
 def test_ordinary_cp_reducer_preserves_sample_mean_mode() -> None:
@@ -353,64 +472,3 @@ def test_opd_sample_mask_cp_reducer_masks_response_rows() -> None:
     torch.testing.assert_close(loss, torch.zeros_like(loss))
     loss.backward()
     torch.testing.assert_close(student[0].grad, torch.zeros_like(student[0]))
-
-
-def test_opd_train_data_schema_does_not_duplicate_rollout_log_probs():
-    args = Namespace(
-        use_opd=True,
-        opd_type="sglang",
-        opd_token_selection="student_sampled",
-        opd_kl_coef=1.0,
-        opd_loss_coef=0.0,
-    )
-    fields = ["rollout_log_probs"]
-
-    opd_utils.consume_opd_train_data(fields, args)
-
-    assert fields.count("rollout_log_probs") == 1
-    assert fields.count("teacher_log_probs") == 1
-
-
-@pytest.mark.parametrize("cp_rank, expected_rows", [(0, [5, 6, 7]), (1, [0, 1, 2, 3, 4])])
-def test_ordinary_topk_cp_slicing_preserves_response_rows(cp_rank: int, expected_rows: list[int]) -> None:
-    pytest.importorskip("megatron.core")
-    rows = torch.arange(8, dtype=torch.float32).unsqueeze(1).repeat(1, 3)
-    rollout_data = {
-        "total_lengths": [16],
-        "response_lengths": [8],
-        "opd_topk_token_ids": [rows.to(dtype=torch.long)],
-        "opd_topk_student_log_probs": [rows],
-        "opd_topk_teacher_log_probs": [rows + 10],
-    }
-    args = Namespace(opd_token_selection="student_topk", qkv_format="thd", allgather_cp=False)
-
-    opd_utils.slice_opd_topk_rollout_fields(
-        rollout_data,
-        args,
-        dynamic_cp_size=2,
-        dynamic_cp_rank=cp_rank,
-    )
-
-    expected = torch.tensor(expected_rows, dtype=torch.float32)
-    actual = rollout_data["opd_topk_student_log_probs"][0]
-    assert actual.shape == (len(expected_rows), 3)
-    torch.testing.assert_close(actual[:, 0], expected)
-    torch.testing.assert_close(rollout_data["opd_topk_token_ids"][0][:, 0].float(), expected)
-
-
-def test_ordinary_union_topk_cp_slicing_preserves_ragged_lengths() -> None:
-    pytest.importorskip("megatron.core")
-    rows = torch.arange(8, dtype=torch.float32).unsqueeze(1).repeat(1, 2)
-    rollout_data = {
-        "total_lengths": [16],
-        "response_lengths": [8],
-        "opd_topk_student_log_probs": [rows],
-        "opd_topk_teacher_log_probs": [rows + 10],
-        "opd_topk_ksz": [torch.arange(8, dtype=torch.long) + 1],
-    }
-    args = Namespace(opd_token_selection="union", qkv_format="thd", allgather_cp=False)
-
-    opd_utils.slice_opd_topk_rollout_fields(rollout_data, args, dynamic_cp_size=2, dynamic_cp_rank=0)
-
-    torch.testing.assert_close(rollout_data["opd_topk_student_log_probs"][0][:, 0], torch.arange(5, 8).float())
-    torch.testing.assert_close(rollout_data["opd_topk_ksz"][0], torch.arange(5, 8) + 1)

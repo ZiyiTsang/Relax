@@ -19,15 +19,20 @@ group rollout
 两个接口都是统一调用路径，由分配到的 feedback 类提供实现：`OPDFeedback` 和 `OPSDFeedback`
 的 `record_sample_feedback()` 为空；`SciKnowEvalSDPOFeedback`、`ToolUseSDPOFeedback`、
 `CodeSDPOFeedback` 记录各自 sample 的 feedback。随后 `prepare_teacher_prompts()` 接收完整
-group 和对应 rewards：SciKnowEval 按 `group_index` 选择同组 successful response，ToolUse/Code
-只使用当前 sample 的 feedback。plain OPD 使用 rollout tokens，ordinary OPSD 使用数据侧的
-`Sample.teacher_prompt`，SDPO 才在此处写入动态 `Sample.teacher_prompt` 和
-`opd_sample_mask`；student prompt、response、rollout token ids 和 student Top-K ids 不变。
+group 和对应 rewards：三个 SDPO 类都优先按 `group_index`（没有时按 metadata 中的 `uid`）选择
+同组成功 peer，没有 peer 时允许成功样本自引用，绝不跨组/UID；当前 sample 的 feedback 仍只注入
+当前 sample。plain OPD 使用 rollout tokens，ordinary OPSD 使用数据侧的 `Sample.teacher_prompt`，
+SDPO 才在此处写入动态 `Sample.teacher_prompt` 和 `opd_sample_mask`；student prompt、response、
+rollout token ids 和 student Top-K ids 不变。
 teacher 仍对原 response 在 student-selected Top-K support 上重打分。
 
 没有 solution/feedback 时 teacher prompt 回退到原 prompt，但 teacher 并不实时跟随 student，
 因此该 sample 的合法 teacher log-prob 仍可能产生错误的非零 OPD 梯度；此时
-`opd_sample_mask=False`，在 OPD loss reduction 中屏蔽该 sample，基础 RL loss 不受影响。
+`opd_sample_mask=False`，在 OPD loss reduction 中屏蔽该 sample，基础 RL loss 不受影响。普通
+OPD/OPSD 未携带 `opd_sample_mask` 时仍沿用 upstream/main 的原始 OPD loss reducer 和归一化。
+
+数学公式也沿用 upstream/main：JSD `alpha=0` 是 `KL(student || teacher)`，`alpha=1` 是
+`KL(teacher || student)`；SDPO 不反转这两个端点。
 
 teacher update 支持 `static` 和 `ema`：`static` 保持初始 teacher，`ema` 在 actor update
 后按 `--sdpo-teacher-ema-alpha` 更新并发布 teacher snapshot，alpha 要求大于 0 且不超过 1，默认

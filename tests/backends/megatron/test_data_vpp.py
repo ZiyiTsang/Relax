@@ -182,3 +182,55 @@ def test_get_data_iterator_balance_data_without_boundaries_uses_regular_steps(mo
     _, num_microbatches = data_module.get_data_iterator(args, object(), rollout_data)
 
     assert num_microbatches == [2, 2]
+
+
+@pytest.mark.parametrize("calculate_per_token_loss", [False, True])
+def test_sdpo_denominator_scales_follow_rollout_steps_and_microbatch_order(monkeypatch, calculate_per_token_loss):
+    data_module = _load_data_module(monkeypatch)
+    monkeypatch.setattr(data_module.device_utils, "make_current_torch_device", lambda: torch.device("cpu"))
+    rollout_data = {
+        "total_lengths": [4, 3, 6, 5],
+        "loss_masks": [torch.ones(2), torch.ones(1), torch.ones(3), torch.ones(2)],
+        data_module.OPD_SAMPLE_MASK: [True, False, True, False],
+    }
+    args = Namespace(calculate_per_token_loss=calculate_per_token_loss)
+
+    scales = data_module._get_opd_sample_mask_denominator_scales(args, rollout_data, [2, 2])
+
+    assert scales is not None
+    expected = [1.5, 1.5, 5 / 3, 5 / 3] if calculate_per_token_loss else [2.0, 2.0, 2.0, 2.0]
+    torch.testing.assert_close(torch.stack(scales), torch.tensor(expected))
+
+    iterator = data_module.DataIterator(
+        rollout_data,
+        micro_batch_indices=[[1], [0], [3], [2]],
+        opd_sample_mask_denominator_scales=scales,
+    )
+    batches = [iterator.get_next(["total_lengths"]) for _ in range(4)]
+    assert [batch["total_lengths"] for batch in batches] == [[3], [4], [5], [6]]
+    torch.testing.assert_close(
+        torch.stack([batch[data_module.OPD_SAMPLE_MASK_DENOMINATOR_SCALE][0] for batch in batches]),
+        torch.tensor(expected),
+    )
+
+    fixed_iterator = data_module.DataIterator(
+        rollout_data,
+        micro_batch_size=2,
+        opd_sample_mask_denominator_scales=scales,
+    )
+    fixed_batches = [fixed_iterator.get_next(["total_lengths"]) for _ in range(2)]
+    torch.testing.assert_close(
+        torch.stack([batch[data_module.OPD_SAMPLE_MASK_DENOMINATOR_SCALE][0] for batch in fixed_batches]),
+        torch.tensor([expected[0], expected[2]]),
+    )
+
+
+def test_ordinary_data_iterator_does_not_create_sdpo_denominator_scale(monkeypatch):
+    data_module = _load_data_module(monkeypatch)
+    args = Namespace(calculate_per_token_loss=True)
+    rollout_data = {
+        "total_lengths": [4, 3],
+        "loss_masks": [torch.ones(2), torch.ones(1)],
+    }
+
+    assert data_module._get_opd_sample_mask_denominator_scales(args, rollout_data, [2]) is None

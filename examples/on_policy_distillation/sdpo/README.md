@@ -26,8 +26,8 @@ prompt-data
     ├── custom reward：计算 score，并记录 feedback
     │
     ├── SDPO feedback：构造每个样本的 teacher prompt
-    │       ├── SciKnowEval：共享同 group 内的成功回答，并加入当前样本反馈
-    │       └── ToolUse：只加入当前样本的工具调用/格式反馈
+    │       ├── SciKnowEval：共享同 group/UID 内的成功回答，并加入当前样本反馈
+    │       └── ToolUse/Code：同样共享同 group/UID 内的成功回答，并加入当前样本反馈
     │
     ├── managed SGLang teacher：对动态 teacher prompt 计算 top-K log-probability
     │
@@ -36,20 +36,20 @@ prompt-data
 
 当前脚本使用以下关键配置：
 
-| 配置 | 当前值 | 说明 |
-| --- | --- | --- |
-| `--use-opd` | 开启 | 启用 on-policy distillation |
-| `--opd-type` | `sglang` | teacher 由 Relax 管理的 SGLang 服务提供 log-probability |
-| `--opd-token-selection` | `student_topk` | 在学生 rollout 的 top-K token 集合上计算 SDPO 信号 |
-| `--opd-log-prob-top-k` | `100` | 每个位置收集 100 个 token 的 log-probability |
-| `--opd-kl-type` | `jsd` | 使用 JSD 形式的 token-level distillation criterion |
-| `--opd-norm-mode` | `tail` | 保留 top-K 之外的 tail probability mass |
-| `--opd-loss-coef` | `1.0` | 将 distillation signal 作为 loss 注入训练 |
-| `--opd-kl-coef` | `0.0` | 不使用 advantage 形式的 OPD KL |
-| `--opd-disable-rl-reward` | 开启 | 不把基础 RL outcome reward 注入 actor 优化；custom reward 仍用于 SDPO feedback |
-| `--group-rm` | 开启 | 让同一个 prompt 的多个 rollout 进入同一 reward group |
-| `--use-rollout-logprobs` | 开启 | 复用学生 rollout 阶段的 log-probability 数据 |
-| `--colocate --offload` | 开启 | 在 rollout、teacher 和 actor 之间切换共享 GPU 资源 |
+| 配置                      | 当前值         | 说明                                                                           |
+| ------------------------- | -------------- | ------------------------------------------------------------------------------ |
+| `--use-opd`               | 开启           | 启用 on-policy distillation                                                    |
+| `--opd-type`              | `sglang`       | teacher 由 Relax 管理的 SGLang 服务提供 log-probability                        |
+| `--opd-token-selection`   | `student_topk` | 在学生 rollout 的 top-K token 集合上计算 SDPO 信号                             |
+| `--opd-log-prob-top-k`    | `100`          | 每个位置收集 100 个 token 的 log-probability                                   |
+| `--opd-kl-type`           | `jsd`          | 使用 JSD 形式的 token-level distillation criterion                             |
+| `--opd-norm-mode`         | `tail`         | 保留 top-K 之外的 tail probability mass                                        |
+| `--opd-loss-coef`         | `1.0`          | 将 distillation signal 作为 loss 注入训练                                      |
+| `--opd-kl-coef`           | `0.0`          | 不使用 advantage 形式的 OPD KL                                                 |
+| `--opd-disable-rl-reward` | 开启           | 不把基础 RL outcome reward 注入 actor 优化；custom reward 仍用于 SDPO feedback |
+| `--group-rm`              | 开启           | 让同一个 prompt 的多个 rollout 进入同一 reward group                           |
+| `--use-rollout-logprobs`  | 开启           | 复用学生 rollout 阶段的 log-probability 数据                                   |
+| `--colocate --offload`    | 开启           | 在 rollout、teacher 和 actor 之间切换共享 GPU 资源                             |
 
 `student_topk` 模式需要 SGLang 支持按位置返回 token ID。launcher 会设置
 `RELAX_OPD_PER_POS_TOKEN_IDS=1`；运行环境还必须安装对应的 SGLang source patch。详见
@@ -72,14 +72,14 @@ prompt-data
 {"actor": [1, 2], "rollout": [1, 1], "teacher": [1, 1]}
 ```
 
-| 脚本 | 数据入口 | 默认 rollout 配置 | Feedback 类 | teacher timeout |
-| --- | --- | --- | --- | --- |
-| [`run-sciknoweval-biology-2xgpu-colocate.sh`](run-sciknoweval-biology-2xgpu-colocate.sh) | `sciknoweval/biology/train.jsonl` | `num-rollout=50`，`n-samples-per-prompt=8`，`global-batch-size=32` | `SciKnowEvalSDPOFeedback` | 600 s |
-| [`run-sciknoweval-chemistry-2xgpu-colocate.sh`](run-sciknoweval-chemistry-2xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2` | `SciKnowEvalSDPOFeedback` | 120 s |
-| [`run-sciknoweval-physics-2xgpu-colocate.sh`](run-sciknoweval-physics-2xgpu-colocate.sh) | `sciknoweval/physics/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2` | `SciKnowEvalSDPOFeedback` | 120 s |
-| [`run-sciknoweval-material-2xgpu-colocate.sh`](run-sciknoweval-material-2xgpu-colocate.sh) | `sciknoweval/material/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2` | `SciKnowEvalSDPOFeedback` | 120 s |
-| [`run-tooluse-2xgpu-colocate.sh`](run-tooluse-2xgpu-colocate.sh) | `tooluse/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2` | `ToolUseSDPOFeedback` | 120 s |
-| [`run-toolalpaca-2xgpu-colocate.sh`](run-toolalpaca-2xgpu-colocate.sh) | `toolalpaca/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2` | `ToolUseSDPOFeedback` | 120 s |
+| 脚本                                                                                         | 数据入口                            | 默认 rollout 配置                                                  | Feedback 类               | teacher timeout |
+| -------------------------------------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------ | ------------------------- | --------------- |
+| [`run-sciknoweval-biology-2xgpu-colocate.sh`](run-sciknoweval-biology-2xgpu-colocate.sh)     | `sciknoweval/biology/train.jsonl`   | `num-rollout=50`，`n-samples-per-prompt=8`，`global-batch-size=32` | `SciKnowEvalSDPOFeedback` | 600 s           |
+| [`run-sciknoweval-chemistry-2xgpu-colocate.sh`](run-sciknoweval-chemistry-2xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` | 120 s           |
+| [`run-sciknoweval-physics-2xgpu-colocate.sh`](run-sciknoweval-physics-2xgpu-colocate.sh)     | `sciknoweval/physics/train.jsonl`   | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` | 120 s           |
+| [`run-sciknoweval-material-2xgpu-colocate.sh`](run-sciknoweval-material-2xgpu-colocate.sh)   | `sciknoweval/material/train.jsonl`  | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` | 120 s           |
+| [`run-tooluse-2xgpu-colocate.sh`](run-tooluse-2xgpu-colocate.sh)                             | `tooluse/train.jsonl`               | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `ToolUseSDPOFeedback`     | 120 s           |
+| [`run-toolalpaca-2xgpu-colocate.sh`](run-toolalpaca-2xgpu-colocate.sh)                       | `toolalpaca/train.jsonl`            | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `ToolUseSDPOFeedback`     | 120 s           |
 
 其中 Chemistry、Physics、Materials、ToolUse 和 ToolAlpaca launcher 是两卡 smoke 配置；
 Biology launcher 使用更大的默认 rollout 配置。当前脚本没有独立的公共 SDPO launcher，
@@ -87,12 +87,12 @@ Biology launcher 使用更大的默认 rollout 配置。当前脚本没有独立
 
 ## 文件结构
 
-| 文件 | 用途 |
-| --- | --- |
-| [`env.sh`](env.sh) | 设置项目根目录、Python/Megatron 环境、模型路径和数据根目录，并停止当前 Ray 进程 |
-| [`prepare_data.py`](prepare_data.py) | 将参考数据转换为 Relax 的 `prompt`/`label`/`metadata` JSONL schema |
-| [`reward.py`](reward.py) | 提供 SciKnowEval、ToolUse 和 ToolAlpaca 的 rule-based reward |
-| `run-*-2xgpu-colocate.sh` | 按数据集启动两卡 colocate SDPO 训练 |
+| 文件                                 | 用途                                                                            |
+| ------------------------------------ | ------------------------------------------------------------------------------- |
+| [`env.sh`](env.sh)                   | 设置项目根目录、Python/Megatron 环境、模型路径和数据根目录，并停止当前 Ray 进程 |
+| [`prepare_data.py`](prepare_data.py) | 将参考数据转换为 Relax 的 `prompt`/`label`/`metadata` JSONL schema              |
+| [`reward.py`](reward.py)             | 提供 SciKnowEval、ToolUse 和 ToolAlpaca 的 rule-based reward                    |
+| `run-*-2xgpu-colocate.sh`            | 按数据集启动两卡 colocate SDPO 训练                                             |
 
 ## 环境准备
 
@@ -115,15 +115,15 @@ SGLang teacher 和 Qwen3-4B 训练配置正确加载。当前 SDPO prompt-routin
 launcher 会自行回到项目根目录，并在内部 source `examples/on_policy_distillation/sdpo/env.sh`。
 请先根据当前机器修改其中的环境路径和 checkpoint 路径：
 
-| 变量 | 用途 |
-| --- | --- |
-| `RELAX_VENV` | Relax-SDPO Python 虚拟环境 |
-| `RELAX_PYTHON` | 训练入口使用的 Python |
-| `MEGATRON` | 与当前 Relax worktree 配套的 Megatron 和 Python package 路径 |
-| `PYTHONPATH` | 由项目根目录和 `MEGATRON` 路径组成 |
-| `STUDENT_MODEL_PATH` | 学生模型 HF checkpoint |
-| `TEACHER_MODEL_PATH` | managed SGLang teacher 的 HF checkpoint |
-| `SDPO_DATA_ROOT` | 准备好的 SDPO JSONL 数据根目录 |
+| 变量                 | 用途                                                         |
+| -------------------- | ------------------------------------------------------------ |
+| `RELAX_VENV`         | Relax-SDPO Python 虚拟环境                                   |
+| `RELAX_PYTHON`       | 训练入口使用的 Python                                        |
+| `MEGATRON`           | 与当前 Relax worktree 配套的 Megatron 和 Python package 路径 |
+| `PYTHONPATH`         | 由项目根目录和 `MEGATRON` 路径组成                           |
+| `STUDENT_MODEL_PATH` | 学生模型 HF checkpoint                                       |
+| `TEACHER_MODEL_PATH` | managed SGLang teacher 的 HF checkpoint                      |
+| `SDPO_DATA_ROOT`     | 准备好的 SDPO JSONL 数据根目录                               |
 
 `env.sh` 当前对上述变量使用固定默认值，而不是 `${VAR:-default}` 形式。因此，在命令行
 预先 export `STUDENT_MODEL_PATH` 或 `TEACHER_MODEL_PATH` 会被 `env.sh` 中的赋值覆盖；如果
@@ -289,9 +289,10 @@ true/false 任务会进行归一化比较。
 The attempted answer is incorrect. Recheck the reasoning and final answer.
 ```
 
-`SciKnowEvalSDPOFeedback` 会在同一 `group_index` 内寻找 `score >= 1` 的成功 response，
-将其包装为 `<successful_attempt>`，并把当前样本的错误信息包装为 `<feedback>`。成功回答
-本身没有 peer 时可以使用自己的回答；不同问题之间不会共享回答。
+`SciKnowEvalSDPOFeedback`、`ToolUseSDPOFeedback` 和 `CodeSDPOFeedback` 都会优先在同一
+`group_index` 内寻找 `score >= 1` 的成功 peer；没有 `group_index` 时使用 `metadata.uid`
+隔离。成功 peer 包装为 `<successful_attempt>`，当前样本的错误信息包装为 `<feedback>`。
+同组没有 peer 时，成功样本可以使用自己的回答；不同 group/UID 之间不会共享回答。
 
 ### ToolUse 与 ToolAlpaca
 
@@ -303,8 +304,9 @@ Action Input: <JSON object>
 ```
 
 reward 会分别检查 tool action 和 JSON 参数；格式错误、tool 选择错误或参数不匹配都会
-产生 score=0，并生成不泄露 gold answer 的错误反馈。`ToolUseSDPOFeedback` 对每个样本
-单独构造 teacher prompt，不会把同 group 的其他工具调用答案注入当前样本。
+产生 score=0，并生成不泄露 gold answer 的错误反馈。`ToolUseSDPOFeedback` 和
+`CodeSDPOFeedback` 会把同 group/UID 的成功工具/代码尝试注入当前样本，同时只保留当前
+样本自己的 feedback；成功样本默认也可以自引用。
 
 ## Teacher 模式与限制
 

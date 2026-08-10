@@ -35,7 +35,9 @@ class EnvironmentFeedback(ABC):
             for key in ("feedback", "error", "feedback_raw"):
                 value = reward.get(key)
                 if value:
-                    return value if isinstance(value, str) else str(value)
+                    if isinstance(value, str):
+                        return value if value.strip() else None
+                    return str(value)
         return None
 
     @staticmethod
@@ -75,9 +77,7 @@ def _record_sdpo_sample_feedback(sample: Sample, reward: Any) -> None:
 
 def _render_sdpo_teacher_prompt(sample: Sample, additions: list[str]) -> str | list[dict[str, str]]:
     prompt = copy.deepcopy(sample.prompt)
-    suffix = "\n\n".join(
-        additions + (["Now produce the best answer to the original problem."] if additions else [])
-    )
+    suffix = "\n\n".join(additions + (["Now produce the best answer to the original problem."] if additions else []))
     if isinstance(prompt, list):
         messages = prompt
         if not messages or messages[-1].get("role") != "user":
@@ -96,18 +96,44 @@ def _set_sdpo_teacher_prompt(sample: Sample, additions: list[str]) -> None:
     sample.teacher_prompt_length = None
 
 
-def _prepare_sample_feedback_prompt(sample: Sample, reward: Any) -> None:
-    feedback = EnvironmentFeedback.feedback_text(sample, reward)
-    additions = [f"<feedback>\n{feedback}\n</feedback>"] if feedback else []
-    _set_sdpo_teacher_prompt(sample, additions)
-
-
 def _is_successful_reward(reward: Any) -> bool:
     value = reward.get("score", reward.get("reward")) if isinstance(reward, dict) else reward
     try:
         return float(value) >= 1.0
     except (TypeError, ValueError):
         return False
+
+
+def _sdpo_group_key(sample: Sample, position: int) -> Any:
+    if sample.group_index is not None:
+        return ("group", sample.group_index)
+    metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    uid = metadata.get("uid")
+    return ("uid", uid) if uid is not None else ("singleton", position)
+
+
+def _prepare_sdpo_teacher_prompts(group: list[Sample], rewards: list[Any]) -> None:
+    if len(group) != len(rewards):
+        raise ValueError(f"feedback requires one reward per sample: {len(group)} != {len(rewards)}")
+    by_group: dict[Any, list[Sample]] = defaultdict(list)
+    for position, sample in enumerate(group):
+        by_group[_sdpo_group_key(sample, position)].append(sample)
+    reward_by_id = {id(sample): reward for sample, reward in zip(group, rewards, strict=True)}
+    successful = {
+        key: [sample for sample in samples if _is_successful_reward(reward_by_id[id(sample)])]
+        for key, samples in by_group.items()
+    }
+    for key, samples in by_group.items():
+        for sample in samples:
+            peer = next((candidate for candidate in successful[key] if candidate is not sample), None)
+            source = peer or next((candidate for candidate in successful[key] if candidate is sample), None)
+            additions = []
+            if source is not None:
+                additions.append(f"<successful_attempt>\n{source.response}\n</successful_attempt>")
+            feedback = EnvironmentFeedback.feedback_text(sample, reward_by_id[id(sample)])
+            if feedback:
+                additions.append(f"<feedback>\n{feedback}\n</feedback>")
+            _set_sdpo_teacher_prompt(sample, additions)
 
 
 class SciKnowEvalSDPOFeedback(EnvironmentFeedback):
@@ -117,33 +143,7 @@ class SciKnowEvalSDPOFeedback(EnvironmentFeedback):
         _record_sdpo_sample_feedback(sample, reward)
 
     def prepare_teacher_prompts(self, group: list[Sample], rewards: list[Any]) -> None:
-        if len(group) != len(rewards):
-            raise ValueError(f"feedback requires one reward per sample: {len(group)} != {len(rewards)}")
-        by_group: dict[Any, list[Sample]] = defaultdict(list)
-        for position, sample in enumerate(group):
-            key = sample.group_index if sample.group_index is not None else ("singleton", position)
-            by_group[key].append(sample)
-        reward_by_id = {id(sample): reward for sample, reward in zip(group, rewards, strict=True)}
-        successful = {
-            key: [sample for sample in samples if _is_successful_reward(reward_by_id[id(sample)])]
-            for key, samples in by_group.items()
-        }
-        for key, samples in by_group.items():
-            for sample in samples:
-                peer = next(
-                    (candidate for candidate in successful[key] if candidate is not sample),
-                    None,
-                )
-                source = peer
-                if source is None:
-                    source = next((candidate for candidate in successful[key] if candidate is sample), None)
-                additions = []
-                if source is not None:
-                    additions.append(f"<successful_attempt>\n{source.response}\n</successful_attempt>")
-                feedback = self.feedback_text(sample, reward_by_id[id(sample)])
-                if feedback:
-                    additions.append(f"<feedback>\n{feedback}\n</feedback>")
-                _set_sdpo_teacher_prompt(sample, additions)
+        _prepare_sdpo_teacher_prompts(group, rewards)
 
 
 class ToolUseSDPOFeedback(EnvironmentFeedback):
@@ -153,10 +153,7 @@ class ToolUseSDPOFeedback(EnvironmentFeedback):
         _record_sdpo_sample_feedback(sample, reward)
 
     def prepare_teacher_prompts(self, group: list[Sample], rewards: list[Any]) -> None:
-        if len(group) != len(rewards):
-            raise ValueError(f"feedback requires one reward per sample: {len(group)} != {len(rewards)}")
-        for sample, reward in zip(group, rewards, strict=True):
-            _prepare_sample_feedback_prompt(sample, reward)
+        _prepare_sdpo_teacher_prompts(group, rewards)
 
 
 class CodeSDPOFeedback(EnvironmentFeedback):
@@ -166,10 +163,7 @@ class CodeSDPOFeedback(EnvironmentFeedback):
         _record_sdpo_sample_feedback(sample, reward)
 
     def prepare_teacher_prompts(self, group: list[Sample], rewards: list[Any]) -> None:
-        if len(group) != len(rewards):
-            raise ValueError(f"feedback requires one reward per sample: {len(group)} != {len(rewards)}")
-        for sample, reward in zip(group, rewards, strict=True):
-            _prepare_sample_feedback_prompt(sample, reward)
+        _prepare_sdpo_teacher_prompts(group, rewards)
 
 
 def load_feedback_class(path: str | None) -> type[EnvironmentFeedback]:

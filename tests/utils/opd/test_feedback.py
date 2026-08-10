@@ -9,7 +9,7 @@ import pytest
 from relax.utils.types import Sample
 
 
-def _sample(group: int, index: int, response: str, reward: object, **metadata: object) -> Sample:
+def _sample(group: int | None, index: int, response: str, reward: object, **metadata: object) -> Sample:
     return Sample(
         group_index=group,
         index=index,
@@ -49,14 +49,18 @@ def test_record_sample_feedback_uses_feedback_specific_sample_stage() -> None:
     assert sdpo_sample.metadata["env_feedback"] == ["fix the second step"]
 
 
-def test_sciknoweval_sdpo_solution_is_shared_only_inside_group_and_feedback_stays_local() -> None:
-    from relax.utils.opd.feedback import SciKnowEvalSDPOFeedback
+@pytest.mark.parametrize(
+    "feedback_class_name",
+    ["SciKnowEvalSDPOFeedback", "ToolUseSDPOFeedback", "CodeSDPOFeedback"],
+)
+def test_sdpo_solution_is_shared_only_inside_group_and_feedback_stays_local(feedback_class_name: str) -> None:
+    import relax.utils.opd.feedback as feedback_module
 
     target = _sample(7, 0, "wrong", {"score": 0.0}, env_feedback=["fix arithmetic"])
     success = _sample(7, 1, "correct solution", {"score": 1.0}, env_feedback=["success details"])
     unrelated = _sample(8, 2, "other", {"score": 0.0}, env_feedback=["unrelated feedback"])
 
-    feedback = SciKnowEvalSDPOFeedback()
+    feedback = getattr(feedback_module, feedback_class_name)()
     feedback.prepare_teacher_prompts([target, success, unrelated], [target.reward, success.reward, unrelated.reward])
 
     assert target.teacher_prompt is not None
@@ -75,14 +79,18 @@ def test_sciknoweval_sdpo_solution_is_shared_only_inside_group_and_feedback_stay
     assert "unrelated feedback" in unrelated_text
 
 
-def test_sciknoweval_sdpo_prefers_peer_solution_and_falls_back_to_self_success() -> None:
-    from relax.utils.opd.feedback import SciKnowEvalSDPOFeedback
+@pytest.mark.parametrize(
+    "feedback_class_name",
+    ["SciKnowEvalSDPOFeedback", "ToolUseSDPOFeedback", "CodeSDPOFeedback"],
+)
+def test_sdpo_prefers_peer_solution_and_falls_back_to_self_success(feedback_class_name: str) -> None:
+    import relax.utils.opd.feedback as feedback_module
 
     self_success = _sample(9, 0, "self solution", {"score": 1.0})
     peer_success = _sample(9, 1, "peer solution", {"score": 1.0})
 
     singleton_success = _sample(10, 0, "only solution", {"score": 1.0})
-    SciKnowEvalSDPOFeedback().prepare_teacher_prompts(
+    getattr(feedback_module, feedback_class_name)().prepare_teacher_prompts(
         [self_success, peer_success, singleton_success],
         [self_success.reward, peer_success.reward, singleton_success.reward],
     )
@@ -99,16 +107,6 @@ def test_sdpo_falls_back_to_original_prompt_without_solution_or_feedback() -> No
     from relax.utils.opd.feedback import ToolUseSDPOFeedback
 
     sample = _sample(3, 0, "an answer", {"score": 0.0})
-    ToolUseSDPOFeedback().prepare_teacher_prompts([sample], [sample.reward])
-
-    assert sample.teacher_prompt == sample.prompt
-    assert sample.opd_sample_mask is False
-
-
-def test_sdpo_falls_back_when_only_successful_response_has_no_peer_solution() -> None:
-    from relax.utils.opd.feedback import ToolUseSDPOFeedback
-
-    sample = _sample(3, 0, "the correct answer", {"score": 1.0})
     ToolUseSDPOFeedback().prepare_teacher_prompts([sample], [sample.reward])
 
     assert sample.teacher_prompt == sample.prompt
@@ -134,25 +132,37 @@ def test_sdpo_fallback_copies_original_message_prompt() -> None:
     assert sample.opd_sample_mask is False
 
 
-def test_sciknoweval_sdpo_uses_same_group_successful_rollout() -> None:
-    from relax.utils.opd.feedback import SciKnowEvalSDPOFeedback
+@pytest.mark.parametrize(
+    "feedback_class_name",
+    ["SciKnowEvalSDPOFeedback", "ToolUseSDPOFeedback", "CodeSDPOFeedback"],
+)
+def test_sdpo_uses_same_group_successful_rollout(feedback_class_name: str) -> None:
+    import relax.utils.opd.feedback as feedback_module
 
     failed = _sample(4, 0, "wrong", {"score": 0.0})
     solved = _sample(4, 1, "worked solution", {"score": 1.0})
-    SciKnowEvalSDPOFeedback().prepare_teacher_prompts([failed, solved], [failed.reward, solved.reward])
+    getattr(feedback_module, feedback_class_name)().prepare_teacher_prompts(
+        [failed, solved], [failed.reward, solved.reward]
+    )
 
     assert "worked solution" in str(failed.teacher_prompt)
     assert failed.opd_sample_mask is True
 
 
-def test_sciknoweval_sdpo_accepts_an_empty_successful_response() -> None:
-    from relax.utils.opd.feedback import SciKnowEvalSDPOFeedback
+@pytest.mark.parametrize("feedback_class_name", ["ToolUseSDPOFeedback", "CodeSDPOFeedback"])
+def test_tool_and_code_use_uid_when_group_index_is_missing(feedback_class_name: str) -> None:
+    import relax.utils.opd.feedback as feedback_module
 
-    failed = _sample(5, 0, "wrong", {"score": 0.0})
-    solved = _sample(5, 1, "", {"score": 1.0})
-    SciKnowEvalSDPOFeedback().prepare_teacher_prompts([failed, solved], [failed.reward, solved.reward])
+    failed = _sample(None, 0, "failed attempt", {"score": 0.0}, uid="uid-a")
+    solved = _sample(None, 1, "same uid solution", {"score": 1.0}, uid="uid-a")
+    unrelated = _sample(None, 2, "other uid solution", {"score": 1.0}, uid="uid-b")
 
-    assert "<successful_attempt>" in str(failed.teacher_prompt)
+    getattr(feedback_module, feedback_class_name)().prepare_teacher_prompts(
+        [failed, solved, unrelated], [failed.reward, solved.reward, unrelated.reward]
+    )
+
+    assert "same uid solution" in str(failed.teacher_prompt)
+    assert "other uid solution" not in str(failed.teacher_prompt)
     assert failed.opd_sample_mask is True
 
 
@@ -171,19 +181,20 @@ def test_ordinary_opd_feedback_does_not_create_a_sample_mask() -> None:
     assert opsd_sample.teacher_prompt == "dataset teacher prompt"
 
 
-def test_tool_and_code_feedback_do_not_share_peer_solutions() -> None:
-    from relax.utils.opd.feedback import CodeSDPOFeedback, ToolUseSDPOFeedback
+@pytest.mark.parametrize("feedback_class_name", ["ToolUseSDPOFeedback", "CodeSDPOFeedback"])
+def test_tool_and_code_feedback_share_peer_solutions(feedback_class_name: str) -> None:
+    import relax.utils.opd.feedback as feedback_module
 
-    failed = _sample(11, 0, "failed attempt", 0.0)
-    solved = _sample(11, 1, "successful attempt", 1.0)
-    for feedback in (ToolUseSDPOFeedback(), CodeSDPOFeedback()):
-        current_failed = _sample(11, 0, failed.response, failed.reward)
-        current_solved = _sample(11, 1, solved.response, solved.reward)
-        feedback.prepare_teacher_prompts(
-            [current_failed, current_solved], [current_failed.reward, current_solved.reward]
-        )
-        assert "successful attempt" not in str(current_failed.teacher_prompt)
-        assert current_failed.opd_sample_mask is False
+    failed = _sample(11, 0, "failed attempt", {"score": 0.0, "feedback": "fix the tool call"})
+    solved = _sample(11, 1, "successful attempt", {"score": 1.0})
+    getattr(feedback_module, feedback_class_name)().prepare_teacher_prompts(
+        [failed, solved], [failed.reward, solved.reward]
+    )
+
+    teacher_text = str(failed.teacher_prompt)
+    assert "successful attempt" in teacher_text
+    assert "fix the tool call" in teacher_text
+    assert failed.opd_sample_mask is True
 
 
 @pytest.mark.parametrize(
