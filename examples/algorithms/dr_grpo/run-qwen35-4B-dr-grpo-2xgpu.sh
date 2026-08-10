@@ -1,28 +1,24 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
-set -euo pipefail
+set -ex
+set -o pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-1}"
-export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-}"
 if [ -z "${RELAX_ENTRYPOINT_MODE:-}" ]; then
     source "${SCRIPT_DIR}/../../../scripts/entrypoint/local.sh"
 fi
 source "${MODEL_CONFIG_DIR}/qwen35-4B.sh"
 
-USE_DRGRPO="${USE_DRGRPO:-0}"
-PROJECT_NAME="${PROJECT_NAME:-Relax-dr-grpo-math}"
+USE_DRGRPO="${USE_DRGRPO:-1}"
+PROJECT_NAME="${PROJECT_NAME:=Relax/dr-grpo/math}"
 EXP_DIR="${EXP_DIR:-${SCRIPT_DIR}/../../../exps}"
 MODEL_DIR="${MODEL_DIR:-${EXP_DIR}}"
 DATA_DIR="${DATA_DIR:-${EXP_DIR}}"
 TRAIN_DATA="${TRAIN_DATA:-${DATA_DIR}/Loop/ROLL_loop/data/math_deepmath_deal.jsonl}"
 EVAL_DATA="${EVAL_DATA:-${DATA_DIR}/G-OPD/data/aime24/test.jsonl}"
 MODEL_PATH="${MODEL_DIR}/Qwen3.5-4B"
-RUN_NAME="qwen35-4B-$([ "${USE_DRGRPO}" = 1 ] && echo dr-grpo || echo grpo)-aime24"
-export FLASHINFER_DISABLE_VERSION_CHECK=1
-export WANDB_RUN_NAME="${RUN_NAME}"
 
 CHECKPOINT_ARGS=(
     --hf-checkpoint "${MODEL_PATH}"
