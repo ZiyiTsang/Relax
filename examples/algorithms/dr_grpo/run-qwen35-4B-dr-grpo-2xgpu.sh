@@ -5,20 +5,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-1}"
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-}"
 if [ -z "${RELAX_ENTRYPOINT_MODE:-}" ]; then
     source "${SCRIPT_DIR}/../../../scripts/entrypoint/local.sh"
 fi
 source "${MODEL_CONFIG_DIR}/qwen35-4B.sh"
 
-USE_DRGRPO="${USE_DRGRPO:-1}"
-PROJECT_NAME="${PROJECT_NAME:-Relax/dr-grpo/math}"
-
-MODEL_DIR="${MODEL_DIR:?MODEL_DIR must point to the model root}"
-DATA_DIR="${DATA_DIR:?DATA_DIR must point to the dataset root}"
+USE_DRGRPO="${USE_DRGRPO:-0}"
+PROJECT_NAME="${PROJECT_NAME:-Relax-dr-grpo-math}"
+EXP_DIR="${EXP_DIR:-${SCRIPT_DIR}/../../../exps}"
+MODEL_DIR="${MODEL_DIR:-${EXP_DIR}}"
+DATA_DIR="${DATA_DIR:-${EXP_DIR}}"
 TRAIN_DATA="${TRAIN_DATA:-${DATA_DIR}/Loop/ROLL_loop/data/math_deepmath_deal.jsonl}"
 EVAL_DATA="${EVAL_DATA:-${DATA_DIR}/G-OPD/data/aime24/test.jsonl}"
 MODEL_PATH="${MODEL_DIR}/Qwen3.5-4B"
 RUN_NAME="qwen35-4B-$([ "${USE_DRGRPO}" = 1 ] && echo dr-grpo || echo grpo)-aime24"
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 export WANDB_RUN_NAME="${RUN_NAME}"
 
 CHECKPOINT_ARGS=(
@@ -32,12 +35,13 @@ ROLLOUT_ARGS=(
     --input-key prompt
     --label-key ground_truth
     --apply-chat-template
+    --apply-chat-template-kwargs '{"enable_thinking": true}'
     --rollout-shuffle
     --rm-type math
     --num-rollout 200
     --rollout-batch-size 64
     --n-samples-per-prompt 8
-    --rollout-max-response-len 8192
+    --rollout-max-response-len 16384
     --rollout-temperature 1.0
     --rollout-top-p 1.0
     --rollout-top-k -1
@@ -72,8 +76,9 @@ EVAL_ARGS=(
     --eval-prompt-data aime "${EVAL_DATA}"
     --eval-input-key problem
     --eval-label-key answer
+    --apply-chat-template-kwargs '{"enable_thinking": true}'
     --n-samples-per-eval-prompt 8
-    --eval-max-response-len 8192
+    --eval-max-response-len 16384
     --eval-temperature 1.0
     --eval-top-p 1.0
 )
@@ -94,15 +99,17 @@ OPTIMIZER_ARGS=(
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size 1
+    --tensor-model-parallel-size 2
     --pipeline-model-parallel-size 1
-    --context-parallel-size 2
+    --context-parallel-size 1
     --sequence-parallel
+    --no-rope-fusion
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 8192
-    --log-probs-max-tokens-per-gpu 8192
+    --max-tokens-per-gpu 20384
+    --log-probs-max-tokens-per-gpu 16384
     --rollout-num-gpus-per-engine 1
-    --sglang-mem-fraction-static 0.7
+    --sglang-mem-fraction-static 0.45
+    --sglang-chunked-prefill-size 4096
     --recompute-granularity full
     --recompute-method uniform
     --recompute-num-layers 1
@@ -113,6 +120,7 @@ exec python3 -m relax.entrypoints.train \
     --seed 1234 \
     --resource '{"actor": [1, 2], "rollout": [1, 2], "advantages": [1, 0]}' \
     --colocate \
+    --offload \
     --wandb-project "${PROJECT_NAME}" \
     "${MODEL_ARGS[@]}" \
     "${CHECKPOINT_ARGS[@]}" \
