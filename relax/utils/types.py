@@ -45,6 +45,7 @@ class Sample:
     opd_topk_student_log_probs: list[np.ndarray] | None = None
     opd_topk_teacher_log_probs: list[np.ndarray] | None = None
     opd_topk_ksz: np.ndarray | None = None  # [only union]
+    opd_sample_mask: bool | None = None
 
     teacher_prompt: str | list[dict[str, str]] | None = None
     teacher_multimodal_inputs: dict[str, Any] | None = None

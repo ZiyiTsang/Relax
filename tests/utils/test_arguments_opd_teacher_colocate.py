@@ -184,7 +184,7 @@ def test_opd_jsd_help_describes_existing_alpha(arguments_module):
 
 def _configure_sdpo_ema(args):
     args.group_rm = True
-    args.opd_feedback_class = "relax.utils.opd.feedback.SDPOFeedback"
+    args.opd_feedback_class = "relax.utils.opd.feedback.SciKnowEvalSDPOFeedback"
     args.opd_token_selection = "student_topk"
     args.opd_log_prob_top_k = 2
     args.opd_kl_coef = 0.0

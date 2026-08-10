@@ -287,16 +287,30 @@ def test_sdpo_empty_teacher_context_fails_before_teacher_request(teacher_prompt)
     assert manager._needs_teacher_request(usable_context) is True
 
 
-def test_sdpo_transfer_schema_contains_only_topk_payload() -> None:
+def test_sdpo_transfer_schema_contains_sample_mask_and_topk_payload() -> None:
     manager = object.__new__(OpdManager)
     manager.is_sdpo = True
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
 
     assert manager.schema_opd_transfer_data() == [
+        "opd_sample_mask",
         TopkWorker.TRANSFER_TOKEN_IDS,
         TopkWorker.TRANSFER_TEACHER_LOG_PROBS,
     ]
+
+
+def test_sdpo_transfer_preserves_sample_mask_order() -> None:
+    manager = object.__new__(OpdManager)
+    manager.is_sdpo = True
+    manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
+    manager.sampled_worker = None
+    samples = [Sample(index=0, opd_sample_mask=True), Sample(index=1, opd_sample_mask=False)]
+    train_data = {}
+
+    manager.produce_opd_transfer_data(samples, train_data)
+
+    assert train_data["opd_sample_mask"] == [True, False]
 
 
 @pytest.mark.parametrize(
@@ -320,11 +334,25 @@ def test_sdpo_transfer_schema_contains_only_topk_payload() -> None:
         ("opd", "teacher_topk", 0.0, 1.0, ["opd_topk_token_ids", "opd_topk_teacher_log_probs"]),
         ("opd", "union", 0.0, 1.0, ["opd_topk_token_ids", "opd_topk_teacher_log_probs", "opd_topk_ksz"]),
         ("opsd", "student_topk", 0.0, 1.0, ["opd_topk_token_ids", "opd_topk_teacher_log_probs"]),
-        ("sdpo", "student_topk", 0.0, 1.0, ["opd_topk_token_ids", "opd_topk_teacher_log_probs"]),
+        (
+            "sdpo",
+            "student_topk",
+            0.0,
+            1.0,
+            ["opd_sample_mask", "opd_topk_token_ids", "opd_topk_teacher_log_probs"],
+        ),
     ],
 )
 def test_teacher_transfer_schema_matrix(mode, selection, kl_coef, loss_coef, expected) -> None:
     args = SimpleNamespace(
+        use_opd=True,
+        opd_type="sglang",
+        group_rm=mode == "sdpo",
+        opd_feedback_class=(
+            "relax.utils.opd.feedback.SciKnowEvalSDPOFeedback"
+            if mode == "sdpo"
+            else "relax.utils.opd.feedback.OPDFeedback"
+        ),
         opd_token_selection=selection,
         opd_log_prob_top_k=2,
         opd_kl_coef=kl_coef,

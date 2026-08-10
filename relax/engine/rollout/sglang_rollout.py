@@ -698,7 +698,7 @@ async def generate_and_rm_group(
         for sample, reward in zip(group, rewards, strict=False):
             sample.reward = reward
             if state.feedback is not None:
-                state.feedback.record_reward(sample, reward)
+                state.feedback.record_sample_feedback(sample, reward)
 
         if state.opd_manager and not evaluation:
             if state.feedback is None:

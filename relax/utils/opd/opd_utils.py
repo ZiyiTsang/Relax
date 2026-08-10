@@ -35,6 +35,7 @@ OPD_ROLLOUT_LOG_SKIP_FIELDS = frozenset(
 )
 
 OPD_CP_FLOAT_FIELDS = ("teacher_log_probs",)
+OPD_SAMPLE_MASK = "opd_sample_mask"
 
 
 def iter_opd_cp_float_fields() -> tuple[str, ...]:
@@ -90,9 +91,9 @@ def is_sdpo_teacher_ema_enabled(args: Any) -> bool:
     is_sdpo = False
     if feedback_class:
         try:
-            from relax.utils.opd.feedback import SDPOFeedback, load_feedback_class
+            from relax.utils.opd.feedback import load_feedback_class
 
-            is_sdpo = issubclass(load_feedback_class(feedback_class), SDPOFeedback)
+            is_sdpo = bool(getattr(load_feedback_class(feedback_class), "is_sdpo_feedback", False))
         except (ImportError, TypeError, ValueError):
             is_sdpo = False
     return (
@@ -110,9 +111,9 @@ def is_sdpo_prompt_routing_enabled(args: Any) -> bool:
     if not feedback_class:
         return False
     try:
-        from relax.utils.opd.feedback import SDPOFeedback, load_feedback_class
+        from relax.utils.opd.feedback import load_feedback_class
 
-        is_sdpo = issubclass(load_feedback_class(feedback_class), SDPOFeedback)
+        is_sdpo = bool(getattr(load_feedback_class(feedback_class), "is_sdpo_feedback", False))
     except (ImportError, TypeError, ValueError):
         is_sdpo = False
     return (
@@ -1637,17 +1638,47 @@ def apply_opd_to_advantages(
         advantages[i] = adv - args.opd_kl_coef * kl_term.detach()
 
 
-def reduce_opd_loss(batch: RolloutBatch, values: torch.Tensor) -> torch.Tensor:
+def reduce_opd_loss(
+    batch: RolloutBatch,
+    values: torch.Tensor,
+    loss_masks: list[torch.Tensor] | None = None,
+) -> torch.Tensor:
+    loss_masks = batch["loss_masks"] if loss_masks is None else loss_masks
     chunks = torch.split(values, batch["response_lengths"], dim=0)
     masked_chunks = []
-    for chunk, loss_mask in zip(chunks, batch["loss_masks"], strict=False):
+    for chunk, loss_mask in zip(chunks, loss_masks, strict=False):
         mask = loss_mask.to(device=chunk.device, dtype=chunk.dtype)
         masked = chunk * mask
         masked_chunks.append(masked)
 
     numerator = torch.cat(masked_chunks, dim=0).sum()
-    denominator = sum(mask.to(device=values.device, dtype=values.dtype).sum() for mask in batch["loss_masks"])
+    denominator = sum(mask.to(device=values.device, dtype=values.dtype).sum() for mask in loss_masks)
     return numerator / torch.clamp_min(denominator, 1)
+
+
+def _get_opd_sample_mask(batch: RolloutBatch, num_samples: int, device: torch.device) -> torch.Tensor | None:
+    raw_mask = batch.get(OPD_SAMPLE_MASK)
+    if raw_mask is None:
+        return None
+    mask = torch.as_tensor(raw_mask, device=device)
+    if mask.ndim != 1 or mask.numel() != num_samples:
+        raise ValueError(
+            f"{OPD_SAMPLE_MASK} must contain one scalar per sample: "
+            f"expected {num_samples}, got shape {tuple(mask.shape)}"
+        )
+    return mask.to(dtype=torch.float32)
+
+
+def _mask_opd_values_for_cp1(
+    values: torch.Tensor,
+    response_lengths: list[int],
+    sample_mask: torch.Tensor,
+) -> torch.Tensor:
+    chunks = values.split(response_lengths, dim=0)
+    masked_chunks = [
+        chunk * sample_mask[index].to(device=chunk.device, dtype=chunk.dtype) for index, chunk in enumerate(chunks)
+    ]
+    return torch.cat(masked_chunks, dim=0)
 
 
 def _opd_context_parallel_size(args: Namespace, batch: RolloutBatch) -> int:
@@ -1749,23 +1780,41 @@ def compute_policy_opd_loss(
         with torch.no_grad():
             reported_loss["opd_is_clip_frac"] = (ratio > clip).float().mean().clone().detach()
 
-    opd_reducer = sum_of_sample_mean
-    if _opd_context_parallel_size(args, batch) > 1:
-        if opd_reducer is None:
-            from relax.backends.megatron.cp_utils import get_sum_of_sample_mean
+    context_parallel_size = _opd_context_parallel_size(args, batch)
+    opd_sample_mask = _get_opd_sample_mask(batch, len(batch["response_lengths"]), log_probs.device)
+    gated_loss_masks = None
+    if opd_sample_mask is not None:
+        gated_loss_masks = [
+            torch.as_tensor(loss_mask, device=log_probs.device) * opd_sample_mask[index].to(dtype=torch.float32)
+            for index, loss_mask in enumerate(batch["loss_masks"])
+        ]
 
-            opd_reducer = get_sum_of_sample_mean(
-                batch["total_lengths"],
-                batch["response_lengths"],
-                batch["loss_masks"],
-                getattr(args, "calculate_per_token_loss", False),
-                args.qkv_format,
-                batch.get("max_seq_lens"),
-                batch.get("padded_total_lengths"),
-                dynamic_cp_size=batch.get("dynamic_cp_size"),
-                dynamic_cp_rank=batch.get("dynamic_cp_rank"),
-            )
-    opd_loss = opd_reducer(opd_per_token_kl) if opd_reducer is not None else reduce_opd_loss(batch, opd_per_token_kl)
+    opd_reducer = sum_of_sample_mean
+    if opd_sample_mask is not None and context_parallel_size == 1:
+        opd_per_token_kl = _mask_opd_values_for_cp1(
+            opd_per_token_kl,
+            batch["response_lengths"],
+            opd_sample_mask,
+        )
+    if context_parallel_size > 1 and (opd_reducer is None or gated_loss_masks is not None):
+        from relax.backends.megatron.cp_utils import get_sum_of_sample_mean
+
+        opd_reducer = get_sum_of_sample_mean(
+            batch["total_lengths"],
+            batch["response_lengths"],
+            gated_loss_masks if gated_loss_masks is not None else batch["loss_masks"],
+            getattr(args, "calculate_per_token_loss", False),
+            args.qkv_format,
+            batch.get("max_seq_lens"),
+            batch.get("padded_total_lengths"),
+            dynamic_cp_size=batch.get("dynamic_cp_size"),
+            dynamic_cp_rank=batch.get("dynamic_cp_rank"),
+        )
+    opd_loss = (
+        opd_reducer(opd_per_token_kl)
+        if opd_reducer is not None
+        else reduce_opd_loss(batch, opd_per_token_kl, loss_masks=gated_loss_masks)
+    )
     return opd_loss_coef * opd_loss, reported_loss
 
 

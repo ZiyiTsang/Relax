@@ -10,7 +10,7 @@ import numpy as np
 
 from relax.utils.logging_utils import get_logger
 from relax.utils.opd import opd_main_worker, opd_opsd_worker
-from relax.utils.opd.opd_utils import is_sdpo_prompt_routing_enabled
+from relax.utils.opd.opd_utils import OPD_SAMPLE_MASK, is_sdpo_prompt_routing_enabled
 from relax.utils.opd.sdpo import SDPO_TOKEN_SELECTION, validate_sdpo_text_only
 from relax.utils.types import Sample
 
@@ -139,6 +139,8 @@ class OpdManager:
 
     def schema_opd_transfer_data(self) -> list[str]:
         fields: list[str] = []
+        if self.is_sdpo:
+            fields.append(OPD_SAMPLE_MASK)
         if self.topk_worker is not None:
             fields.extend(self.topk_worker.topk_transfer_fields())
         if self.sampled_worker is not None:
@@ -166,6 +168,8 @@ class OpdManager:
             setattr(sample, field_name, None)
 
     def produce_opd_transfer_data(self, samples: list[Sample], train_data: dict) -> None:
+        if self.is_sdpo:
+            train_data[OPD_SAMPLE_MASK] = [bool(sample.opd_sample_mask) for sample in samples]
         if self.topk_worker is not None:
             transfer_fields = (
                 self.topk_worker.topk_transfer_fields() if self.is_sdpo else opd_main_worker.TopkWorker.TRANSFER_FIELDS
