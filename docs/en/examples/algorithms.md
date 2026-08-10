@@ -7,6 +7,11 @@ GRPO, CISPO, GSPO, and SAPO share the same service topology, so their argument b
 Dr.GRPO combines centered group advantages with a fixed-scale token-sum policy
 loss. Both changes can be enabled explicitly in a GRPO training recipe.
 
+REINFORCE++ and REINFORCE++-baseline also reuse the GRPO service topology, but
+their return, global normalization and KL contracts are algorithm-specific.
+See [REINFORCE++ Training](../guide/reinforce-plus-plus.md) before enabling
+either estimator.
+
 ---
 
 ## GRPO
@@ -284,6 +289,8 @@ SAPO_ARGS=(
 | **PPO** | Critic values + GAE | PPO-Clip (hard clip) | Disabled in the current synchronous topology |
 | **GRPO** | Group-relative reward | PPO-Clip (hard clip) | Optional KL loss |
 | **Dr.GRPO** | Centered group reward without std normalization | Fixed-scale token-sum aggregation | Optional KL loss |
+| **REINFORCE++** | Token KL-to-go return + global token normalization | PPO-Clip (hard clip) | k1 KL in shaped reward |
+| **REINFORCE++-baseline** | Inclusive group mean + global token normalization | PPO-Clip (hard clip) | Separate k2 KL loss |
 | **CISPO** | Group-relative reward | Stop-gradient coefficient | Recommended KL loss |
 | **GSPO** | Group-relative reward | PPO-Clip + sequence-level KL | Sequence-level ratio |
 | **SAPO** | Group-relative reward | Sigmoid gate | Temperature-controlled |
@@ -291,6 +298,7 @@ SAPO_ARGS=(
 ## Next Steps
 
 - [PPO Training](../guide/ppo-training.md)
+- [REINFORCE++ Training](../guide/reinforce-plus-plus.md)
 - [Quick Start](../guide/quick-start.md)
 - [On-Policy Distillation](./on-policy-distillation.md)
 - [Generative Reward Model](./generative-reward-model.md)

@@ -6,6 +6,8 @@ GRPO、CISPO、GSPO 与 SAPO 使用相同的服务拓扑，可以直接在现有
 
 Dr.GRPO 将组内中心化 advantage 与固定尺度 token-sum policy loss 组合起来。两个修改都可以在 GRPO 训练 recipe 中显式启用。
 
+REINFORCE++ 与 REINFORCE++-baseline 同样复用 GRPO 服务拓扑，但 return、全局归一化和 KL 契约由算法单独定义。启用任一 estimator 前，请先阅读 [REINFORCE++ 训练文档](../guide/reinforce-plus-plus.md)。
+
 ---
 
 ## GRPO
@@ -271,6 +273,8 @@ SAPO_ARGS=(
 | **PPO** | Critic value + GAE | PPO-Clip（硬裁剪） | 当前同步拓扑中禁用 |
 | **GRPO** | 组相对奖励 | PPO-Clip（硬裁剪） | 可选 KL loss |
 | **Dr.GRPO** | 不进行标准差归一化的中心化组奖励 | 固定尺度 token-sum aggregation | 可选 KL loss |
+| **REINFORCE++** | Token KL-to-go return + 全局 token 归一化 | PPO-Clip（硬裁剪） | shaped reward 中的 k1 KL |
+| **REINFORCE++-baseline** | Inclusive group mean + 全局 token 归一化 | PPO-Clip（硬裁剪） | 独立 k2 KL loss |
 | **CISPO** | 组相对奖励 | Stop-gradient 系数 | 推荐 KL loss |
 | **GSPO** | 组相对奖励 | PPO-Clip + 序列级 KL | 序列级 ratio |
 | **SAPO** | 组相对奖励 | Sigmoid 门控 | 温度控制 |
@@ -278,6 +282,7 @@ SAPO_ARGS=(
 ## 下一步
 
 - [PPO 训练](../guide/ppo-training.md)
+- [REINFORCE++ 训练](../guide/reinforce-plus-plus.md)
 - [快速开始](../guide/quick-start.md)
 - [在线策略蒸馏](./on-policy-distillation.md)
 - [生成式奖励模型](./generative-reward-model.md)
