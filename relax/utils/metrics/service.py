@@ -6,11 +6,11 @@ from argparse import Namespace
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Union
 
-import wandb
 from fastapi import FastAPI
 from pydantic import BaseModel
 from ray import serve
 
+import wandb
 from relax.utils.env import Envs
 from relax.utils.logging_utils import get_logger
 from relax.utils.metrics.adapters.apprise import _AppriseAdapter
