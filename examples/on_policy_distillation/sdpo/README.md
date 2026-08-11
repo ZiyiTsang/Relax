@@ -1,18 +1,64 @@
 # Relax-SDPO 示例
 
-本目录提供 Relax-SDPO 的文本训练示例。SDPO（Self-Distillation from
-Preference Optimization）先让学生模型在自己的 rollout 上产生多个回答，再根据 reward
-生成反馈或成功回答，并把这些信息加入 teacher prompt。teacher 使用加入反馈后的 prompt
-重新计算 token-level log-probability，学生模型通过 on-policy distillation loss 学习如何修正
-自己的回答。
+本目录提供 Relax-SDPO 的文本训练示例。SDPO（Self-Distillation from Preference
+Optimization）是一种让模型学会「照做成功回答」的训练方法：先让同一个问题生成多个回答，
+再用 reward 找出其中的成功回答，把成功回答作为示范注入 teacher prompt，最后让学生模型
+通过 on-policy distillation loss 学习修正自己的回答。
 
-当前示例使用 Relax 管理的 SGLang teacher，并以 colocate 方式在两张 GPU 上运行：训练时
-actor 使用整个两卡资源，rollout 和 teacher 在 rollout 阶段分别使用一张 GPU。六个 launcher
-都使用静态 teacher、文本输入、`student_topk` token selection 和 JSD loss。
+这里的所有 launcher 都帮你把整套流程跑通：rollout → reward → feedback → managed
+SGLang teacher → `student_topk + JSD` 蒸馏训练，你只需要准备数据和修改环境配置。
 
-> **运行前请先确认当前 pod 上没有其他 Ray 任务。** `env.sh` 会执行 `ray stop`，因此 source
-> 它时会停止当前 pod 上的 Ray 进程。训练机上如果有其他任务正在运行，不要直接执行这些
-> launcher。
+> **运行前请先确认当前 pod 上没有其他 Ray 任务。** `env.sh` 会执行 `ray stop`，因此
+> source 它会停止当前 pod 上的 Ray 进程。训练机上如果有其他任务正在运行，不要直接执行
+> 这些 launcher。
+
+## 这个示例包含什么
+
+- 六个开箱即用的两卡 colocate 训练脚本（SciKnowEval × 4、ToolUse、ToolAlpaca）
+- 数据转换工具 `prepare_data.py`：把参考数据转成 Relax 的 `prompt`/`label`/`metadata`
+  JSONL schema
+- 规则 reward 与 SDPO feedback 实现（`reward.py` 与 `relax.utils.opd.feedback`）
+- 由 Relax 自动管理的 SGLang teacher，无需手动部署
+
+## 前置条件
+
+开始之前请确认以下内容都已就绪：
+
+- 一台可用 **2×GPU** 的机器 / pod，且当前没有其他 Ray 任务在运行
+- Relax worktree，以及配套的 Relax-SDPO Python 环境（见下方 `env.sh` 的 `RELAX_VENV`）
+- Qwen3-4B-Instruct-2507 checkpoint（student 与 teacher 默认共用同一个）
+- SDPO 参考数据（SciKnowEval / ToolUse / ToolAlpaca，或你自己的文本数据）
+- SGLang 已应用 per-position token-id patch（launcher 会设置
+  `RELAX_OPD_PER_POS_TOKEN_IDS=1`），详见
+  [通用 OPD 文档中的 SGLang Patch 说明](../README.md#sglang-patch)
+
+## 快速开始
+
+```bash
+# 1. 进入项目根目录，确认环境可用（无残留 Ray 任务）
+cd <relax-worktree>
+ray status          # 或检查当前 pod 的 tmux，确保没有其他任务
+nvidia-smi          # 确认两张 GPU 空闲
+
+# 2. 准备数据：以 SciKnowEval Chemistry 为例
+python3 -m examples.on_policy_distillation.sdpo.prepare_data \
+  --dataset sciknoweval \
+  --input <sdpo-source-root>/datasets/sciknoweval/chemistry/train.json \
+  --domain chemistry \
+  --source-split train \
+  --output <data-root>/SDPO/sciknoweval/chemistry/train.jsonl
+
+# 3. 修改 examples/on_policy_distillation/sdpo/env.sh：
+#    更新 RELAX_VENV / MEGATRON / STUDENT_MODEL_PATH / TEACHER_MODEL_PATH / SDPO_DATA_ROOT
+
+# 4. 启动训练
+bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-2xgpu-colocate.sh
+
+# 5. 观察日志与指标（TensorBoard 曲线、训练 loss / reward / teacher 状态等）
+```
+
+首次验证建议先跑小规模 smoke：`prepare_data.py` 加 `--max-rows 2` 只转两条数据，或先使用
+Chemistry / ToolUse 等默认小 rollout 的 launcher，跑通后再上 Biology 的大配置。
 
 ## 训练流程
 
@@ -62,8 +108,8 @@ prompt-data
 ```text
 两张 GPU 的 colocate resource pool
 ├── actor   ：2 GPU，训练阶段使用整个 pool
-├── rollout  ：1 GPU，rollout 阶段使用
-└── teacher  ：1 GPU，rollout 阶段使用 managed SGLang teacher
+├── rollout ：1 GPU，rollout 阶段使用
+└── teacher ：1 GPU，rollout 阶段使用 managed SGLang teacher
 ```
 
 脚本中的资源配置为：
@@ -72,18 +118,20 @@ prompt-data
 {"actor": [1, 2], "rollout": [1, 1], "teacher": [1, 1]}
 ```
 
-| 脚本                                                                                         | 数据入口                            | 默认 rollout 配置                                                  | Feedback 类               | teacher timeout |
-| -------------------------------------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------ | ------------------------- | --------------- |
-| [`run-sciknoweval-biology-2xgpu-colocate.sh`](run-sciknoweval-biology-2xgpu-colocate.sh)     | `sciknoweval/biology/train.jsonl`   | `num-rollout=50`，`n-samples-per-prompt=8`，`global-batch-size=32` | `SciKnowEvalSDPOFeedback` | 600 s           |
-| [`run-sciknoweval-chemistry-2xgpu-colocate.sh`](run-sciknoweval-chemistry-2xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` | 120 s           |
-| [`run-sciknoweval-physics-2xgpu-colocate.sh`](run-sciknoweval-physics-2xgpu-colocate.sh)     | `sciknoweval/physics/train.jsonl`   | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` | 120 s           |
-| [`run-sciknoweval-material-2xgpu-colocate.sh`](run-sciknoweval-material-2xgpu-colocate.sh)   | `sciknoweval/material/train.jsonl`  | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` | 120 s           |
-| [`run-tooluse-2xgpu-colocate.sh`](run-tooluse-2xgpu-colocate.sh)                             | `tooluse/train.jsonl`               | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `ToolUseSDPOFeedback`     | 120 s           |
-| [`run-toolalpaca-2xgpu-colocate.sh`](run-toolalpaca-2xgpu-colocate.sh)                       | `toolalpaca/train.jsonl`            | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `ToolUseSDPOFeedback`     | 120 s           |
+| 脚本                                                                                         | 数据入口                            | 默认 rollout 配置                                                  | Feedback 类               |
+| -------------------------------------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------ | ------------------------- |
+| [`run-sciknoweval-biology-2xgpu-colocate.sh`](run-sciknoweval-biology-2xgpu-colocate.sh)     | `sciknoweval/biology/train.jsonl`   | `num-rollout=50`，`n-samples-per-prompt=8`，`global-batch-size=32` | `SciKnowEvalSDPOFeedback` |
+| [`run-sciknoweval-chemistry-2xgpu-colocate.sh`](run-sciknoweval-chemistry-2xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` |
+| [`run-sciknoweval-physics-2xgpu-colocate.sh`](run-sciknoweval-physics-2xgpu-colocate.sh)     | `sciknoweval/physics/train.jsonl`   | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` |
+| [`run-sciknoweval-material-2xgpu-colocate.sh`](run-sciknoweval-material-2xgpu-colocate.sh)   | `sciknoweval/material/train.jsonl`  | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` |
+| [`run-tooluse-2xgpu-colocate.sh`](run-tooluse-2xgpu-colocate.sh)                             | `tooluse/train.jsonl`               | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `ToolUseSDPOFeedback`     |
+| [`run-toolalpaca-2xgpu-colocate.sh`](run-toolalpaca-2xgpu-colocate.sh)                       | `toolalpaca/train.jsonl`            | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `ToolUseSDPOFeedback`     |
 
 其中 Chemistry、Physics、Materials、ToolUse 和 ToolAlpaca launcher 是两卡 smoke 配置；
 Biology launcher 使用更大的默认 rollout 配置。当前脚本没有独立的公共 SDPO launcher，
-每个数据入口都显式指定了自己的 feedback 类。
+每个数据入口都显式指定了自己的 feedback 类。student rollout 统一为
+`--rollout-max-response-len 8192`；teacher 请求超时由各 launcher 的
+`--opd-teacher-timeout-s` 控制（未显式设置时默认 30 s），需要时可自行调整。
 
 ## 文件结构
 
@@ -129,12 +177,10 @@ launcher 会自行回到项目根目录，并在内部 source `examples/on_polic
 预先 export `STUDENT_MODEL_PATH` 或 `TEACHER_MODEL_PATH` 会被 `env.sh` 中的赋值覆盖；如果
 需要更换模型或运行环境，应直接修改 `env.sh`，或维护一份本地 launcher/environment 副本。
 
-另外，`env.sh` 开头执行 `ray stop`。在训练机上执行前必须确认当前 pod 的 tmux 和 Ray
-任务都为空；不要因为某台机器 GPU 空闲就假设它没有其他任务。
-
 ## 数据准备
 
-从 Relax 项目根目录执行以下命令。输入可以是 JSON、JSONL 或 Parquet，输出统一为 JSONL。
+从 Relax 项目根目录执行 `python3 -m examples.on_policy_distillation.sdpo.prepare_data`。
+输入可以是 JSON、JSONL 或 Parquet，输出统一为 JSONL。
 
 ### 输出 schema
 
@@ -159,7 +205,7 @@ launcher 会自行回到项目根目录，并在内部 source `examples/on_polic
 
 ### SciKnowEval
 
-参考 `lasgroup/SDPO` 的数据通常按 domain 保存。以下命令以 Chemistry 为例；Physics、
+数据通常按 domain 保存。以下命令以 Chemistry 为例；Physics、
 Biology 和 Materials 只需要替换 domain、输入路径和输出路径：
 
 ```bash
@@ -211,23 +257,6 @@ python3 -m examples.on_policy_distillation.sdpo.prepare_data \
 
 读取 Parquet 需要当前 Python 环境安装 `pyarrow`。
 
-### Smoke 数据
-
-点火训练前可以限制输出行数：
-
-```bash
-python3 -m examples.on_policy_distillation.sdpo.prepare_data \
-  --dataset sciknoweval \
-  --input <sdpo-source-root>/datasets/sciknoweval/chemistry/train.json \
-  --domain chemistry \
-  --source-split train \
-  --max-rows 2 \
-  --output <data-root>/SDPO/sciknoweval/chemistry/train-smoke.jsonl
-```
-
-`--max-rows` 只截取转换后的样本，不改变数据 schema。使用 smoke 文件训练时，通过
-`DATA_PATH` 覆盖 launcher 的默认数据路径。
-
 ## 启动训练
 
 ### 使用 `SDPO_DATA_ROOT` 默认路径
@@ -251,13 +280,13 @@ $SDPO_DATA_ROOT/
 bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-2xgpu-colocate.sh
 ```
 
-### 覆盖数据路径和实验名
+### 使用自定义数据路径
 
-`DATA_PATH` 和 `EXPERIMENT_NAME` 在 launcher source `env.sh` 后读取，可以从命令行覆盖：
+launcher 会优先读取 `DATA_PATH` 环境变量，未设置时才回退到 `SDPO_DATA_ROOT` 下的默认目录，
+因此也可以直接指定你自己的数据文件：
 
 ```bash
-DATA_PATH=<data-root>/SDPO/sciknoweval/chemistry/train-smoke.jsonl \
-EXPERIMENT_NAME=sdpo-sciknoweval-chemistry-smoke \
+DATA_PATH=/path/to/my/train.jsonl \
 bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-2xgpu-colocate.sh
 ```
 
@@ -332,12 +361,13 @@ EMA 时还需要满足：
 
 ## 常见问题
 
-### `Set STUDENT_MODEL_PATH` 或 `Set SDPO_DATA_ROOT`
+### 提示 `Set STUDENT_MODEL_PATH` 或 `Set SDPO_DATA_ROOT`
 
 检查 `env.sh` 中的模型、Python/Megatron 和 `SDPO_DATA_ROOT` 配置。若使用自定义数据，
-可以直接设置 `DATA_PATH`，这样 launcher 不需要依赖 `SDPO_DATA_ROOT` 对应的默认目录。
+可以直接设置 `DATA_PATH`（见上方「使用自定义数据路径」），这样 launcher 不需要依赖
+`SDPO_DATA_ROOT` 对应的默认目录。
 
-### `No rows matched`
+### 提示 `No rows matched`
 
 检查 `--dataset` 是否与输入格式匹配。SciKnowEval 原始格式还需要有效的 L3 domain；
 ToolAlpaca 输入必须包含 `golden_answer`；ToolUse 输入必须包含参考格式中的 `prompt` 和
@@ -347,8 +377,19 @@ ToolAlpaca 输入必须包含 `golden_answer`；ToolUse 输入必须包含参考
 
 检查 teacher/rollout 是否确实各分配一张 GPU，并确认 `--colocate --offload` 没有被删除。
 Biology launcher 的默认 rollout 规模明显大于其他脚本；首次验证建议使用其他 launcher
-或先生成 `--max-rows 2` 的 smoke 数据。必要时应在对应 launcher 中调整 rollout 数量、
-response 长度或 batch 配置。
+或先生成小规模 smoke 数据再训练：
+
+```bash
+python3 -m examples.on_policy_distillation.sdpo.prepare_data \
+  --dataset sciknoweval \
+  --input <sdpo-source-root>/datasets/sciknoweval/chemistry/train.json \
+  --domain chemistry \
+  --source-split train \
+  --max-rows 2 \
+  --output <data-root>/SDPO/sciknoweval/chemistry/train-smoke.jsonl
+```
+
+必要时应在对应 launcher 中调整 rollout 数量、response 长度或 batch 配置。
 
 ### Top-K log-probability 不可用
 

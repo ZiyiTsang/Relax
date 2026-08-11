@@ -35,7 +35,7 @@ ROLLOUT_ARGS=(
     --n-samples-per-prompt 8
     --global-batch-size 32
     --rollout-max-prompt-len 10240
-    --rollout-max-response-len 2048
+    --rollout-max-response-len 8192
     --rollout-max-context-len 18944
     --rollout-temperature 1.0
     --use-fault-tolerance
@@ -51,6 +51,7 @@ OPD_ARGS=(
     --opd-type sglang
     --teacher-hf-checkpoint "${teacher_model}"
     --teacher-num-gpus-per-engine 1
+    --teacher-sglang-context-length 18944
     --teacher-sglang-mem-fraction-static 0.5
     --teacher-sglang-chunked-prefill-size 4096
     --teacher-sglang-max-running-requests 16
@@ -63,7 +64,6 @@ OPD_ARGS=(
     --opd-kl-type jsd
     --opd-jsd-alpha 0.5
     --opd-norm-mode tail
-    --opd-teacher-timeout-s 600
     --use-rollout-logprobs
     --sdpo-teacher-update-mode static
     --sdpo-teacher-ema-alpha 0.01
