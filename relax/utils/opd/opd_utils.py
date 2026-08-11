@@ -840,8 +840,9 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
                 raise ValueError(
                     "SDPO EMA requires a single Relax-managed colocated SGLang teacher with actor and rollout resources."
                 )
-            if not getattr(args, "enable_weights_backuper", False):
-                raise ValueError("SDPO EMA requires --enable-weights-backuper.")
+            # SDPO EMA needs the multi-tag backuper (actor + actor_ema snapshots);
+            # force it on so users do not have to opt in explicitly.
+            args.enable_weights_backuper = True
             from relax.utils.megatron_peft_utils import is_lora_enabled
 
             if is_lora_enabled(args):

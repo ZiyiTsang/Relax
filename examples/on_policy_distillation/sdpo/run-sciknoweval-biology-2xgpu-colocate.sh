@@ -65,7 +65,7 @@ OPD_ARGS=(
     --opd-jsd-alpha 0.5
     --opd-norm-mode tail
     --use-rollout-logprobs
-    --sdpo-teacher-update-mode static
+    --sdpo-teacher-update-mode ema
     --sdpo-teacher-ema-alpha 0.01
 )
 

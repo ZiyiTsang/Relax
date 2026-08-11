@@ -96,6 +96,7 @@ prompt-data
 | `--group-rm`              | 开启           | 让同一个 prompt 的多个 rollout 进入同一 reward group                           |
 | `--use-rollout-logprobs`  | 开启           | 复用学生 rollout 阶段的 log-probability 数据                                   |
 | `--colocate --offload`    | 开启           | 在 rollout、teacher 和 actor 之间切换共享 GPU 资源                             |
+| `--sdpo-teacher-update-mode` | `ema`       | 每个训练步后用 EMA（`--sdpo-teacher-ema-alpha 0.01`）更新 teacher 权重          |
 
 `student_topk` 模式需要 SGLang 支持按位置返回 token ID。launcher 会设置
 `RELAX_OPD_PER_POS_TOKEN_IDS=1`；运行环境还必须安装对应的 SGLang source patch。详见
@@ -336,28 +337,6 @@ reward 会分别检查 tool action 和 JSON 参数；格式错误、tool 选择�
 产生 score=0，并生成不泄露 gold answer 的错误反馈。`ToolUseSDPOFeedback` 和
 `CodeSDPOFeedback` 会把同 group/UID 的成功工具/代码尝试注入当前样本，同时只保留当前
 样本自己的 feedback；成功样本默认也可以自引用。
-
-## Teacher 模式与限制
-
-当前六个 launcher 都显式使用：
-
-```text
---sdpo-teacher-update-mode static
---sdpo-teacher-ema-alpha 0.01
-```
-
-实际运行模式是 `static`；因此 `--sdpo-teacher-ema-alpha` 在这些脚本中只是保留的参数值，
-不会更新 teacher。框架支持 `ema` teacher，但它不是当前 launcher 的默认配置。手工改为
-EMA 时还需要满足：
-
-- 使用 Relax-managed 的单个 teacher checkpoint；
-- 使用 `--colocate` 和 managed teacher resource；
-- 使用 SGLang teacher、Megatron training backend 和 full-model training；
-- 启用 `--enable-weights-backuper`；
-- 不使用 MOPD routes、external teacher URL、hybrid、fully-async 或 LoRA；
-- 继续使用 SDPO 所需的 `--group-rm`、`student_topk`、文本输入和 `--opd-loss-coef`。
-
-如果只是想运行当前示例，请保持 `static`，不要只添加 `--sdpo-teacher-update-mode ema`。
 
 ## 常见问题
 

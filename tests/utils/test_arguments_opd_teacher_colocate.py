@@ -238,7 +238,6 @@ def test_sdpo_ema_rejects_mopd_routes(arguments_module):
     [
         ("fully_async", True, "fully asynchronous"),
         ("hybrid", True, "hybrid"),
-        ("enable_weights_backuper", False, "enable-weights-backuper"),
         ("lora_rank", 8, "LoRA"),
     ],
 )
@@ -248,6 +247,15 @@ def test_sdpo_ema_rejects_unsupported_execution_modes(arguments_module, field_na
 
     with pytest.raises(ValueError, match=message):
         arguments_module.slime_validate_args(args)
+
+
+def test_sdpo_ema_auto_enables_weights_backuper(arguments_module):
+    args = _configure_sdpo_ema(_opd_args())
+    args.enable_weights_backuper = False
+
+    arguments_module.slime_validate_args(args)
+
+    assert args.enable_weights_backuper is True
 
 
 @pytest.mark.parametrize("alpha", [0.0, -0.1, 1.1])
