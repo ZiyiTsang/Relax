@@ -21,11 +21,7 @@ from relax.utils.data.data import get_minimum_num_micro_batch_size
 from relax.utils.data.seqlen_balancing import get_seqlen_balanced_partitions
 from relax.utils.logging_utils import get_logger
 from relax.utils.metrics.metric_utils import compute_rollout_step
-from relax.utils.opd.opd_utils import (
-    OPD_ROLLOUT_LOG_SKIP_FIELDS,
-    OPD_SAMPLE_MASK,
-    OPD_SAMPLE_MASK_DENOMINATOR_SCALE,
-)
+from relax.utils.opd.opd_utils import OPD_ROLLOUT_LOG_SKIP_FIELDS, OPD_SAMPLE_MASK
 from relax.utils.timer import Timer
 from relax.utils.training import train_metric_utils
 from relax.utils.training.flops_counter import FlopsCounter
@@ -295,6 +291,8 @@ def get_batch(
             batch["dynamic_global_batch_size"] = data_iterator.rollout_data["dynamic_global_batch_size"]
     else:
         batch, _ = next(data_iterator)
+
+    _apply_opd_sample_mask(batch)
 
     use_dynamic_context_parallel = getattr(get_args(), "dynamic_context_parallel", False)
     if use_dynamic_context_parallel:
@@ -599,6 +597,27 @@ def get_batch(
     return batch
 
 
+def _apply_opd_sample_mask(batch: dict) -> None:
+    """Fold the OPD sample mask into the per-sample response loss masks.
+
+    Inactive samples get an all-zero loss mask, so the standard loss reduction
+    (num_tokens / sum_of_sample_mean / CP slicing / metric counts) excludes them
+    from both the numerator and the denominator without any extra plumbing.
+    """
+    sample_mask = batch.get(OPD_SAMPLE_MASK)
+    loss_masks = batch.get("loss_masks")
+    if sample_mask is None or loss_masks is None:
+        return
+    if len(sample_mask) != len(loss_masks):
+        raise ValueError(
+            f"{OPD_SAMPLE_MASK} must contain one scalar per sample: expected {len(loss_masks)}, got {len(sample_mask)}"
+        )
+    batch["loss_masks"] = [
+        torch.as_tensor(loss_mask, dtype=torch.float32) * float(mask)
+        for loss_mask, mask in zip(loss_masks, sample_mask, strict=True)
+    ]
+
+
 def gather_log_data(
     metric_name: str,
     args: Namespace,
@@ -659,7 +678,6 @@ class DataIterator:
         micro_batch_size: int | None = None,
         micro_batch_indices: list[list[int]] | None = None,
         max_tokens_per_gpu: int | None = None,
-        opd_sample_mask_denominator_scales: list[torch.Tensor] | None = None,
     ) -> None:
         """Initialize an iterator over `rollout_data`.
 
@@ -677,7 +695,6 @@ class DataIterator:
         self.micro_batch_size = micro_batch_size
         self.micro_batch_indices = micro_batch_indices
         self.max_tokens_per_gpu = max_tokens_per_gpu
-        self.opd_sample_mask_denominator_scales = opd_sample_mask_denominator_scales
         assert micro_batch_size is None or micro_batch_indices is None
         self.offset = 0
 
@@ -710,80 +727,12 @@ class DataIterator:
             self.offset += 1
         else:
             self.offset += self.micro_batch_size
-        if self.opd_sample_mask_denominator_scales is not None:
-            if self.micro_batch_indices is not None:
-                indices = self.micro_batch_indices[self.offset - 1]
-                batch[OPD_SAMPLE_MASK_DENOMINATOR_SCALE] = [
-                    self.opd_sample_mask_denominator_scales[i] for i in indices
-                ]
-            else:
-                start = self.offset - self.micro_batch_size
-                end = self.offset
-                batch[OPD_SAMPLE_MASK_DENOMINATOR_SCALE] = self.opd_sample_mask_denominator_scales[start:end]
         return batch
 
     def reset(self) -> "DataIterator":
         """Reset internal offset to the start and return self."""
         self.offset = 0
         return self
-
-
-def _get_opd_sample_mask_denominator_scales(
-    args: Namespace,
-    rollout_data: RolloutBatch,
-    step_local_sample_counts: list[int],
-) -> list[torch.Tensor] | None:
-    """Compute one active-sample denominator correction for every rollout
-    sample."""
-    raw_sample_mask = rollout_data.get(OPD_SAMPLE_MASK)
-    if raw_sample_mask is None:
-        return None
-
-    num_samples = len(rollout_data["total_lengths"])
-    sample_mask = torch.as_tensor(raw_sample_mask, dtype=torch.float32)
-    if sample_mask.ndim != 1 or sample_mask.numel() != num_samples:
-        raise ValueError(
-            f"{OPD_SAMPLE_MASK} must contain one scalar per sample: "
-            f"expected {num_samples}, got shape {tuple(sample_mask.shape)}"
-        )
-    if sum(step_local_sample_counts) != num_samples:
-        raise ValueError(
-            "sum(rollout_mini_local_sample_counts) must equal num_local_samples, "
-            f"got counts={step_local_sample_counts}, num_local_samples={num_samples}"
-        )
-
-    device = device_utils.make_current_torch_device()
-    denominators = torch.zeros((len(step_local_sample_counts), 2), dtype=torch.float32, device=device)
-    step_offsets = np.cumsum([0, *step_local_sample_counts]).tolist()
-    calculate_per_token_loss = getattr(args, "calculate_per_token_loss", False)
-    loss_masks = rollout_data.get("loss_masks")
-    for step, (start, end) in enumerate(zip(step_offsets[:-1], step_offsets[1:], strict=True)):
-        step_sample_mask = sample_mask[start:end].to(device=device)
-        if calculate_per_token_loss:
-            if loss_masks is None:
-                raise ValueError("loss_masks are required to compute the OPD token denominator")
-            step_loss_masks = [
-                torch.as_tensor(loss_mask, device=device, dtype=torch.float32) for loss_mask in loss_masks[start:end]
-            ]
-            full_denominator = sum((loss_mask.sum() for loss_mask in step_loss_masks), torch.zeros((), device=device))
-            active_denominator = sum(
-                (
-                    loss_mask.sum() * sample_mask_i
-                    for loss_mask, sample_mask_i in zip(step_loss_masks, step_sample_mask, strict=True)
-                ),
-                torch.zeros((), device=device),
-            )
-        else:
-            full_denominator = torch.tensor(end - start, dtype=torch.float32, device=device)
-            active_denominator = step_sample_mask.sum()
-        denominators[step] = torch.stack([full_denominator, active_denominator])
-
-    if dist.is_available() and dist.is_initialized():
-        dp_group = mpu.get_data_parallel_group(with_context_parallel=False)
-        dist.all_reduce(denominators, op=dist.ReduceOp.SUM, group=dp_group)
-
-    scales = denominators[:, 0] / torch.clamp_min(denominators[:, 1], 1)
-    return [scales[step] for step, count in enumerate(step_local_sample_counts) for _ in range(count)]
 
 
 def get_data_iterator(
@@ -876,26 +825,10 @@ def get_data_iterator(
     if step_local_sample_counts is None:
         step_local_sample_counts = [num_local_gbs for _ in range(num_steps_per_rollout)]
 
-    sample_mask_denominator_scales = None
-    if rollout_data.get(OPD_SAMPLE_MASK) is not None:
-        sample_mask_denominator_scales = _get_opd_sample_mask_denominator_scales(
-            args,
-            rollout_data,
-            step_local_sample_counts,
-        )
-
     def _generate_data_iterator(rollout_data, micro_batch_size, micro_batch_indices=None, max_tokens_per_gpu=None):
         data_iterator = []
         for _ in range(vpp_size):
-            data_iterator.append(
-                DataIterator(
-                    rollout_data,
-                    micro_batch_size,
-                    micro_batch_indices,
-                    max_tokens_per_gpu,
-                    sample_mask_denominator_scales,
-                )
-            )
+            data_iterator.append(DataIterator(rollout_data, micro_batch_size, micro_batch_indices, max_tokens_per_gpu))
         return data_iterator
 
     if not args.use_dynamic_batch_size:

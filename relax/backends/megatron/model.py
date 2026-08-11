@@ -1236,42 +1236,24 @@ def train_one_step(
         # Average loss across microbatches.
         keys = losses_reduced[0]["keys"]
         values = None
-        metric_denominators = None
         for x in losses_reduced:
             if values is None:
                 values = x["values"]
             else:
                 values += x["values"]
-            current_denominators = x.get("metric_denominators")
-            if current_denominators is not None:
-                if metric_denominators is None:
-                    metric_denominators = torch.zeros_like(current_denominators)
-                metric_denominators += current_denominators
         assert len(keys) + 1 == values.numel()
         torch.distributed.all_reduce(values, group=mpu.get_data_parallel_group(with_context_parallel=True))
-        if metric_denominators is not None:
-            torch.distributed.all_reduce(
-                metric_denominators,
-                group=mpu.get_data_parallel_group(with_context_parallel=True),
-            )
 
         loss_reduced = {}
         values = values.tolist()
         num_samples_or_tokens = values[0]
-        denominator_values = metric_denominators.tolist() if metric_denominators is not None else None
-        for index, (key, value) in enumerate(zip(keys, values[1:], strict=False)):
+        for key, value in zip(keys, values[1:], strict=False):
             # No cp_size factor: num_samples_or_tokens is the all-reduced CP-local
             # token count (per-token) or sample count, so each token/sample is
             # already counted once. A `* cp_size` here would over-weight metrics by
             # CP degree under dynamic CP (and is a no-op under static CP, where the
             # count previously carried the cancelling cp factor).
-            if denominator_values is not None and denominator_values[index] >= 0:
-                denominator = denominator_values[index]
-                loss_reduced[key] = value / denominator if denominator > 0 else 0.0
-            elif num_samples_or_tokens != 0:
-                loss_reduced[key] = value / num_samples_or_tokens
-            else:
-                loss_reduced[key] = 0.0
+            loss_reduced[key] = value / num_samples_or_tokens if num_samples_or_tokens != 0 else 0.0
         return loss_reduced, grad_norm
     return {}, grad_norm
 

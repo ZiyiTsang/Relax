@@ -1079,7 +1079,6 @@ def policy_loss_function(
         log_probs=log_probs,
         old_log_probs=old_log_probs,
         log_probs_and_entropy=log_probs_and_entropy,
-        sum_of_sample_mean=sum_of_sample_mean,
     )
     if opd_loss is not None:
         loss = loss + opd_loss
@@ -1456,54 +1455,14 @@ def loss_function(
         device=logits.device,
     )
     if is_dummy:
-        log_values = torch.zeros_like(log_values)
-        return (
-            loss,
-            (effective_num_tokens if args.calculate_per_token_loss else torch.tensor(1, device=logits.device)),
-            {
-                "keys": list(log.keys()),
-                "values": log_values,
-            },
-        )
-    denominator_overrides: dict[str, torch.Tensor | None] = {}
-    metric_keys = list(log.keys())
-    metric_values: list[torch.Tensor] = []
-    metric_denominators: list[torch.Tensor] = []
-    for key in metric_keys:
-        value = torch.as_tensor(log[key], device=logits.device)
-        override = denominator_overrides.get(key)
-        if override is None:
-            metric_values.append(value)
-            metric_denominators.append(value.new_full((), -1.0))
-        else:
-            override = torch.as_tensor(override, device=logits.device, dtype=value.dtype)
-            metric_values.append(value * override)
-            metric_denominators.append(override)
-
-    metric_count = (
-        effective_num_tokens.to(device=logits.device, dtype=logits.dtype)
-        if args.calculate_per_token_loss
-        else torch.tensor(0 if is_dummy else num_samples, device=logits.device, dtype=logits.dtype)
-    )
-    log_values = torch.cat(
-        [metric_count.reshape(1), torch.stack(metric_values)] if metric_values else [metric_count.reshape(1)]
-    )
-    metric_denominator_values = (
-        torch.stack(metric_denominators)
-        if metric_denominators
-        else torch.empty(0, device=logits.device, dtype=logits.dtype)
-    )
-    if is_dummy:
         # Drop this mb's contribution from logged metric averages.
         log_values = torch.zeros_like(log_values)
-        metric_denominator_values = torch.zeros_like(metric_denominator_values)
 
     return (
         loss,
         (effective_num_tokens if args.calculate_per_token_loss else torch.tensor(1, device=logits.device)),
         {
-            "keys": metric_keys,
+            "keys": list(log.keys()),
             "values": log_values,
-            "metric_denominators": metric_denominator_values,
         },
     )

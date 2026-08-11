@@ -151,19 +151,12 @@ def test_ordinary_sampled_reverse_kl_matches_independent_upstream_oracle() -> No
     assert torch.allclose(student.grad, torch.full_like(student, 0.5))
 
 
-@pytest.mark.parametrize("calculate_per_token_loss", [False, True])
-def test_ordinary_opd_keeps_upstream_reducer_with_production_reducer(
-    calculate_per_token_loss: bool,
-) -> None:
+def test_ordinary_opd_keeps_upstream_reducer() -> None:
     args = _sampled_loss_args()
-    args.calculate_per_token_loss = calculate_per_token_loss
     student = torch.tensor([-0.7, -0.8, -0.3], requires_grad=True)
     teacher = torch.tensor([-0.4, -0.5, -0.2])
     batch = _sampled_loss_batch()
     batch["teacher_log_probs"] = [teacher[:2], teacher[2:]]
-
-    def production_reducer(values: torch.Tensor) -> torch.Tensor:
-        return values.sum() + 17.0
 
     loss, _ = opd_utils.compute_policy_opd_loss(
         args=args,
@@ -171,7 +164,6 @@ def test_ordinary_opd_keeps_upstream_reducer_with_production_reducer(
         log_probs=student,
         old_log_probs=student.detach(),
         log_probs_and_entropy={},
-        sum_of_sample_mean=production_reducer,
     )
 
     expected_values = torch.cat([student[:2] - teacher[:2], student[2:] - teacher[2:]])
@@ -212,11 +204,13 @@ def test_sdpo_policy_loss_uses_upstream_endpoint_direction(jsd_alpha: float) -> 
         opd_log_prob_min_clamp=None,
         opd_per_token_clip=None,
         opd_is_clip=None,
+        qkv_format="thd",
     )
     student = torch.log(torch.tensor([[0.2, 0.3]])).detach().requires_grad_()
     teacher = torch.log(torch.tensor([[0.1, 0.4]])).detach().requires_grad_()
     batch = {
         "response_lengths": [1],
+        "total_lengths": [2],
         "loss_masks": [torch.ones(1)],
         "dynamic_cp_size": 1,
         "dynamic_cp_rank": 0,
@@ -254,12 +248,14 @@ def _sampled_loss_args() -> Namespace:
         opd_log_prob_min_clamp=None,
         opd_per_token_clip=None,
         opd_is_clip=None,
+        qkv_format="thd",
     )
 
 
 def _sampled_loss_batch(sample_mask: list[bool] | None = None) -> dict:
     batch = {
         "response_lengths": [2, 1],
+        "total_lengths": [3, 2],
         "loss_masks": [torch.ones(2), torch.ones(1)],
         "dynamic_cp_size": 1,
         "dynamic_cp_rank": 0,
@@ -267,37 +263,45 @@ def _sampled_loss_batch(sample_mask: list[bool] | None = None) -> dict:
     }
     if sample_mask is not None:
         batch["opd_sample_mask"] = sample_mask
+        # get_batch folds the sample mask into the loss masks before the loss is
+        # computed; unit fixtures mirror that gating.
+        batch["loss_masks"] = [loss_mask * mask for loss_mask, mask in zip(batch["loss_masks"], sample_mask)]
     return batch
 
 
-def test_opd_sample_mask_keeps_all_one_loss_and_gradient_unchanged() -> None:
+def test_opd_sample_mask_all_one_matches_upstream_mean_after_token_normalization() -> None:
     args = _sampled_loss_args()
+    args.calculate_per_token_loss = True
     student_plain = torch.tensor([-0.7, -0.8, -0.3], requires_grad=True)
-    student_masked = student_plain.detach().clone().requires_grad_(True)
 
     plain_loss, _ = opd_utils.compute_policy_opd_loss(
         args=args,
         batch=_sampled_loss_batch(),
+        log_probs=student_plain.detach(),
+        old_log_probs=student_plain.detach(),
+        log_probs_and_entropy={},
+    )
+    sum_style_loss, _ = opd_utils.compute_policy_opd_loss(
+        args=args,
+        batch=_sampled_loss_batch([True, True]),
         log_probs=student_plain,
         old_log_probs=student_plain.detach(),
         log_probs_and_entropy={},
     )
-    masked_loss, _ = opd_utils.compute_policy_opd_loss(
-        args=args,
-        batch=_sampled_loss_batch([True, True]),
-        log_probs=student_masked,
-        old_log_probs=student_masked.detach(),
-        log_probs_and_entropy={},
-    )
 
-    torch.testing.assert_close(masked_loss, plain_loss)
-    plain_loss.backward()
-    masked_loss.backward()
-    torch.testing.assert_close(student_masked.grad, student_plain.grad)
+    # The masked path uses the sum-style production reducer; after Megatron's
+    # num_tokens normalization the final gradient equals the upstream mean.
+    torch.testing.assert_close(sum_style_loss, plain_loss * 3)
+    sum_style_loss.backward()
+    torch.testing.assert_close(student_plain.grad, torch.ones_like(student_plain))
 
 
-def test_opd_sample_mask_removes_unprivileged_sample_from_loss_and_gradient() -> None:
+@pytest.mark.parametrize("calculate_per_token_loss", [False, True])
+def test_opd_sample_mask_removes_unprivileged_sample_from_loss_and_gradient(
+    calculate_per_token_loss: bool,
+) -> None:
     args = _sampled_loss_args()
+    args.calculate_per_token_loss = calculate_per_token_loss
     student = torch.tensor([-0.7, -0.8, -0.3], requires_grad=True)
 
     loss, _ = opd_utils.compute_policy_opd_loss(
@@ -308,10 +312,11 @@ def test_opd_sample_mask_removes_unprivileged_sample_from_loss_and_gradient() ->
         log_probs_and_entropy={},
     )
 
-    expected = torch.tensor(((-0.7 + 0.4) + (-0.8 + 0.5)) / 2)
+    expected = torch.tensor(-0.6 if calculate_per_token_loss else -0.3)
     torch.testing.assert_close(loss, expected)
     loss.backward()
-    torch.testing.assert_close(student.grad, torch.tensor([0.5, 0.5, 0.0]))
+    expected_gradient = 1.0 if calculate_per_token_loss else 0.5
+    torch.testing.assert_close(student.grad, torch.tensor([expected_gradient, expected_gradient, 0.0]))
 
 
 def test_opd_sample_mask_all_false_has_zero_loss_and_gradient() -> None:
@@ -329,71 +334,6 @@ def test_opd_sample_mask_all_false_has_zero_loss_and_gradient() -> None:
     torch.testing.assert_close(loss, torch.zeros_like(loss))
     loss.backward()
     torch.testing.assert_close(student.grad, torch.zeros_like(student))
-
-
-@pytest.mark.parametrize("calculate_per_token_loss", [False, True])
-def test_opd_sample_mask_uses_active_denominator_with_production_reducer(
-    calculate_per_token_loss: bool,
-) -> None:
-    args = _sampled_loss_args()
-    args.calculate_per_token_loss = calculate_per_token_loss
-    student = torch.tensor([-0.7, -0.8, -0.3], requires_grad=True)
-    teacher = torch.tensor([-0.4, -0.5, -0.2])
-    batch = _sampled_loss_batch([True, False])
-    batch["teacher_log_probs"] = [teacher[:2], teacher[2:]]
-
-    def production_reducer(values: torch.Tensor) -> torch.Tensor:
-        chunks = values.split(batch["response_lengths"], dim=0)
-        if calculate_per_token_loss:
-            return sum(chunk.sum() for chunk in chunks)
-        return sum(chunk.mean() for chunk in chunks)
-
-    loss, _ = opd_utils.compute_policy_opd_loss(
-        args=args,
-        batch=batch,
-        log_probs=student,
-        old_log_probs=student.detach(),
-        log_probs_and_entropy={},
-        sum_of_sample_mean=production_reducer,
-    )
-
-    active_sum = torch.tensor(-0.6 if calculate_per_token_loss else -0.3)
-    full_denominator = torch.tensor(3.0 if calculate_per_token_loss else 2.0)
-    active_denominator = torch.tensor(2.0 if calculate_per_token_loss else 1.0)
-    expected = active_sum * full_denominator / active_denominator
-    torch.testing.assert_close(loss, expected)
-    loss.backward()
-    expected_gradient = 1.5 if calculate_per_token_loss else 1.0
-    torch.testing.assert_close(student.grad, torch.tensor([expected_gradient, expected_gradient, 0.0]))
-
-
-@pytest.mark.parametrize("calculate_per_token_loss", [False, True])
-def test_opd_sample_mask_prefers_step_level_denominator_scale(calculate_per_token_loss: bool) -> None:
-    args = _sampled_loss_args()
-    args.calculate_per_token_loss = calculate_per_token_loss
-    student = torch.tensor([-0.7, -0.8, -0.3], requires_grad=True)
-    teacher = torch.tensor([-0.4, -0.5, -0.2])
-    batch = _sampled_loss_batch([True, False])
-    batch[opd_utils.OPD_SAMPLE_MASK_DENOMINATOR_SCALE] = [torch.tensor(7.0), torch.tensor(7.0)]
-    batch["teacher_log_probs"] = [teacher[:2], teacher[2:]]
-
-    def production_reducer(values: torch.Tensor) -> torch.Tensor:
-        chunks = values.split(batch["response_lengths"], dim=0)
-        if calculate_per_token_loss:
-            return sum(chunk.sum() for chunk in chunks)
-        return sum(chunk.mean() for chunk in chunks)
-
-    loss, _ = opd_utils.compute_policy_opd_loss(
-        args=args,
-        batch=batch,
-        log_probs=student,
-        old_log_probs=student.detach(),
-        log_probs_and_entropy={},
-        sum_of_sample_mean=production_reducer,
-    )
-
-    active_sum = torch.tensor(-0.6 if calculate_per_token_loss else -0.3)
-    torch.testing.assert_close(loss, active_sum * 7)
 
 
 def test_ordinary_cp_reducer_preserves_sample_mean_mode() -> None:
@@ -454,7 +394,7 @@ def test_opd_sample_mask_cp_reducer_masks_response_rows() -> None:
     batch = {
         "total_lengths": [8],
         "response_lengths": [4],
-        "loss_masks": [torch.ones(4)],
+        "loss_masks": [torch.zeros(4)],
         "dynamic_cp_size": 2,
         "dynamic_cp_rank": 0,
         "opd_sample_mask": [False],

@@ -36,7 +36,6 @@ OPD_ROLLOUT_LOG_SKIP_FIELDS = frozenset(
 
 OPD_CP_FLOAT_FIELDS = ("teacher_log_probs",)
 OPD_SAMPLE_MASK = "opd_sample_mask"
-OPD_SAMPLE_MASK_DENOMINATOR_SCALE = "opd_sample_mask_denominator_scale"
 
 
 def iter_opd_cp_float_fields() -> tuple[str, ...]:
@@ -1656,93 +1655,6 @@ def reduce_opd_loss(
     return numerator / torch.clamp_min(denominator, 1)
 
 
-def _get_opd_sample_mask(batch: RolloutBatch, num_samples: int, device: torch.device) -> torch.Tensor | None:
-    raw_mask = batch.get(OPD_SAMPLE_MASK)
-    if raw_mask is None:
-        return None
-    mask = torch.as_tensor(raw_mask, device=device)
-    if mask.ndim != 1 or mask.numel() != num_samples:
-        raise ValueError(
-            f"{OPD_SAMPLE_MASK} must contain one scalar per sample: "
-            f"expected {num_samples}, got shape {tuple(mask.shape)}"
-        )
-    return mask.to(dtype=torch.float32)
-
-
-def _get_opd_step_denominator_scale(batch: RolloutBatch, device: torch.device) -> torch.Tensor | None:
-    raw_scale = batch.get(OPD_SAMPLE_MASK_DENOMINATOR_SCALE)
-    if raw_scale is None:
-        return None
-    if isinstance(raw_scale, (list, tuple)):
-        if not raw_scale:
-            return None
-        raw_scale = raw_scale[0]
-    return torch.as_tensor(raw_scale, device=device, dtype=torch.float32).detach()
-
-
-def _mask_opd_values_for_cp1(
-    values: torch.Tensor,
-    response_lengths: list[int],
-    sample_mask: torch.Tensor,
-) -> torch.Tensor:
-    chunks = values.split(response_lengths, dim=0)
-    masked_chunks = [
-        chunk * sample_mask[index].to(device=chunk.device, dtype=chunk.dtype) for index, chunk in enumerate(chunks)
-    ]
-    return torch.cat(masked_chunks, dim=0)
-
-
-def _opd_context_parallel_size(args: Namespace, batch: RolloutBatch) -> int:
-    dynamic_cp_size = batch.get("dynamic_cp_size")
-    if dynamic_cp_size is not None:
-        return int(dynamic_cp_size)
-    try:
-        from megatron.core import mpu
-
-        return int(mpu.get_context_parallel_world_size())
-    except (ImportError, RuntimeError):
-        return int(getattr(args, "context_parallel_size", 1))
-
-
-def _get_single_rank_opd_reducer(
-    response_lengths: list[int],
-    loss_masks: list[torch.Tensor],
-    calculate_per_token_loss: bool,
-) -> Callable[[torch.Tensor], torch.Tensor]:
-    def reduce_opd_values(values: torch.Tensor) -> torch.Tensor:
-        chunks = values.split(response_lengths, dim=0)
-        if calculate_per_token_loss:
-            return sum(
-                (chunk * loss_mask.to(device=chunk.device, dtype=chunk.dtype)).sum()
-                for chunk, loss_mask in zip(chunks, loss_masks, strict=False)
-            )
-        return sum(
-            (chunk * loss_mask.to(device=chunk.device, dtype=chunk.dtype)).sum()
-            / torch.clamp_min(loss_mask.to(device=chunk.device).sum(), 1)
-            for chunk, loss_mask in zip(chunks, loss_masks, strict=False)
-        )
-
-    return reduce_opd_values
-
-
-def _get_opd_denominator_scale(
-    full_reducer: Callable[[torch.Tensor], torch.Tensor],
-    active_reducer: Callable[[torch.Tensor], torch.Tensor],
-    values: torch.Tensor,
-) -> torch.Tensor:
-    ones = torch.ones_like(values)
-    denominators = torch.stack([full_reducer(ones).detach(), active_reducer(ones).detach()])
-    if dist.is_available() and dist.is_initialized():
-        try:
-            from megatron.core import mpu
-
-            process_group = mpu.get_data_parallel_group(with_context_parallel=True)
-        except (ImportError, RuntimeError):
-            return denominators[0] / torch.clamp_min(denominators[1], 1)
-        dist.all_reduce(denominators, group=process_group)
-    return denominators[0] / torch.clamp_min(denominators[1], 1)
-
-
 def compute_policy_opd_loss(
     *,
     args: Namespace,
@@ -1750,7 +1662,6 @@ def compute_policy_opd_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     log_probs_and_entropy: dict[str, list[torch.Tensor]],
-    sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor | None, dict[str, torch.Tensor]]:
     opd_loss_coef = float(getattr(args, "opd_loss_coef", 0.0))
     if opd_loss_coef == 0.0:
@@ -1830,59 +1741,25 @@ def compute_policy_opd_loss(
         with torch.no_grad():
             reported_loss["opd_is_clip_frac"] = (ratio > clip).float().mean().clone().detach()
 
-    opd_sample_mask = _get_opd_sample_mask(batch, len(batch["response_lengths"]), log_probs.device)
-    gated_loss_masks = None
-    context_parallel_size = None
-    if opd_sample_mask is not None:
-        context_parallel_size = _opd_context_parallel_size(args, batch)
-        gated_loss_masks = [
-            torch.as_tensor(loss_mask, device=log_probs.device) * opd_sample_mask[index].to(dtype=torch.float32)
-            for index, loss_mask in enumerate(batch["loss_masks"])
-        ]
-
-    opd_reducer = None
-    opd_denominator_scale = None
-    if opd_sample_mask is not None and context_parallel_size == 1:
-        opd_per_token_kl = _mask_opd_values_for_cp1(
-            opd_per_token_kl,
-            batch["response_lengths"],
-            opd_sample_mask,
-        )
-        if sum_of_sample_mean is not None:
-            opd_reducer = _get_single_rank_opd_reducer(
-                batch["response_lengths"],
-                gated_loss_masks,
-                getattr(args, "calculate_per_token_loss", False),
-            )
-    if opd_sample_mask is not None and context_parallel_size > 1:
+    if batch.get(OPD_SAMPLE_MASK) is not None:
+        # The batch loss_masks are already gated by the sample mask (get_batch),
+        # so the standard sum-style reduction excludes inactive samples from both
+        # the numerator and the global num_tokens normalizer.
         from relax.backends.megatron.cp_utils import get_sum_of_sample_mean
 
-        opd_reducer = get_sum_of_sample_mean(
+        opd_loss = get_sum_of_sample_mean(
             batch["total_lengths"],
             batch["response_lengths"],
-            gated_loss_masks if gated_loss_masks is not None else batch["loss_masks"],
+            batch["loss_masks"],
             getattr(args, "calculate_per_token_loss", False),
             args.qkv_format,
             batch.get("max_seq_lens"),
             batch.get("padded_total_lengths"),
             dynamic_cp_size=batch.get("dynamic_cp_size"),
             dynamic_cp_rank=batch.get("dynamic_cp_rank"),
-        )
-    if opd_sample_mask is not None and sum_of_sample_mean is not None and opd_reducer is not None:
-        opd_denominator_scale = _get_opd_step_denominator_scale(batch, log_probs.device)
-        if opd_denominator_scale is None:
-            opd_denominator_scale = _get_opd_denominator_scale(
-                sum_of_sample_mean,
-                opd_reducer,
-                opd_per_token_kl,
-            )
-    opd_loss = (
-        opd_reducer(opd_per_token_kl)
-        if opd_reducer is not None
-        else reduce_opd_loss(batch, opd_per_token_kl, loss_masks=gated_loss_masks)
-    )
-    if opd_denominator_scale is not None:
-        opd_loss = opd_loss * opd_denominator_scale
+        )(opd_per_token_kl)
+    else:
+        opd_loss = reduce_opd_loss(batch, opd_per_token_kl)
     return opd_loss_coef * opd_loss, reported_loss
 
 
