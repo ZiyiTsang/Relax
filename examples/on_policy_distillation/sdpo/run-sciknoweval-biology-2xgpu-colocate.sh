@@ -34,9 +34,8 @@ ROLLOUT_ARGS=(
     --rollout-batch-size 4
     --n-samples-per-prompt 8
     --global-batch-size 32
-    --rollout-max-prompt-len 10240
+    --rollout-max-prompt-len 2096
     --rollout-max-response-len 8192
-    --rollout-max-context-len 18944
     --rollout-temperature 1.0
     --use-fault-tolerance
 )
@@ -51,11 +50,7 @@ OPD_ARGS=(
     --opd-type sglang
     --teacher-hf-checkpoint "${teacher_model}"
     --teacher-num-gpus-per-engine 1
-    --teacher-sglang-context-length 18944
     --teacher-sglang-mem-fraction-static 0.5
-    --teacher-sglang-chunked-prefill-size 4096
-    --teacher-sglang-max-running-requests 16
-    --teacher-sglang-disable-cuda-graph
     --opd-loss-coef 1.0
     --opd-kl-coef 0.0
     --opd-disable-rl-reward
@@ -98,7 +93,6 @@ SGLANG_ARGS=(
     --rollout-num-gpus-per-engine 1
     --sglang-load-format dummy
     --sglang-mem-fraction-static 0.45
-    --sglang-disable-cuda-graph
 )
 
 MISC_ARGS=(
