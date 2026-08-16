@@ -54,4 +54,5 @@ tensorboard_log
 # .github
 .github/copilot-instructions.md
 env.sh
-!examples/on_policy_distillation/sdpo/env.sh
+configs/env.yaml
+wandb/

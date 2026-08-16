@@ -918,7 +918,7 @@ class MegatronTrainRayActor(TrainRayActor):
             RoutingReplay.clear_all()
 
         # update the cpu actor weight to the latest model
-        self._backup_actor_and_update_sdpo_teacher_ema()
+        self._snapshot_student_and_step_ema_teacher()
 
         # Update ref model if needed
         if (
@@ -1389,7 +1389,7 @@ class MegatronTrainRayActor(TrainRayActor):
             RoutingReplay.clear_all()
 
         # Update CPU actor weight backup
-        self._backup_actor_and_update_sdpo_teacher_ema()
+        self._snapshot_student_and_step_ema_teacher()
 
         # Update ref model if needed
         if (
@@ -1618,7 +1618,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train and self._per_step_rollout:
             destroy_process_groups()
 
-    def _backup_actor_and_update_sdpo_teacher_ema(self) -> None:
+    def _snapshot_student_and_step_ema_teacher(self) -> None:
         self.weights_backuper.backup("actor")
         if not getattr(self, "_sdpo_teacher_ema_enabled", False):
             return
