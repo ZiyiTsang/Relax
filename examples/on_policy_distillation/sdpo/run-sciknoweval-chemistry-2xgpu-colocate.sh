@@ -66,8 +66,9 @@ OPD_ARGS=(
     --opd-norm-mode tail
     --opd-teacher-timeout-s 120
     --use-rollout-logprobs
-    --sdpo-teacher-update-mode ema
-    --sdpo-teacher-ema-alpha 0.01
+    # --sdpo-teacher-update-mode ema
+    # --sdpo-teacher-ema-alpha 0.01
+    --sdpo-teacher-update-mode static
 )
 
 GRPO_ARGS=(
