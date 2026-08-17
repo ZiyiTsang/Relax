@@ -136,7 +136,7 @@ def test_reference_tooluse_row_is_normalized_for_the_same_reward() -> None:
     assert normalized[0]["metadata"]["golden_answer"][0]["Action"] == "search"
 
 
-def test_reward_returns_feedback_without_exposing_gold_answer() -> None:
+def test_toolalpaca_reward_wrong_action_has_no_feedback() -> None:
     sample = _sample(
         {
             "data_source": "toolalpaca",
@@ -148,5 +148,87 @@ def test_reward_returns_feedback_without_exposing_gold_answer() -> None:
     result = score(None, sample)
 
     assert result["score"] == 0.0
-    assert "does not match" in result["feedback"]
+    assert result["format_error"] == 0
+    assert result["feedback"] == ""
     assert "search" not in result["feedback"]
+
+
+def _sciknoweval_sample(response: str, *, expected: str = "B", task_type: str = "mcq") -> SimpleNamespace:
+    return _sample(
+        {
+            "data_source": "sciknoweval",
+            "answer_key": expected,
+            "task_type": task_type,
+        },
+        response,
+    )
+
+
+def test_sciknoweval_reward_accepts_answer_tag() -> None:
+    result = score(None, _sciknoweval_sample("The answer is <answer>B</answer>."))
+
+    assert result["score"] == 1.0
+    assert result["format_error"] == 0
+    assert result["feedback"] == ""
+
+
+def test_sciknoweval_reward_missing_answer_tag_is_format_error() -> None:
+    result = score(None, _sciknoweval_sample("The answer is B."))
+
+    assert result["score"] == 0.0
+    assert result["format_error"] == 1
+    assert "wrong format" in result["feedback"]
+
+
+def test_sciknoweval_reward_wrong_answer_has_no_feedback() -> None:
+    result = score(None, _sciknoweval_sample("The answer is <answer>C</answer>."))
+
+    assert result["score"] == 0.0
+    assert result["format_error"] == 0
+    assert result["feedback"] == ""
+
+
+def test_sciknoweval_reward_truncation_feedback_takes_priority() -> None:
+    from relax.utils.types import Sample
+
+    sample = _sciknoweval_sample("The answer is B.")
+    sample.status = Sample.Status.TRUNCATED
+
+    result = score(None, sample)
+
+    assert result["score"] == 0.0
+    assert "truncated" in result["feedback"]
+    assert "wrong format" not in result["feedback"]
+
+
+def test_toolalpaca_reward_missing_format_has_feedback() -> None:
+    sample = _sample(
+        {
+            "data_source": "toolalpaca",
+            "golden_answer": [{"Action": "search", "Action_Input": '{"query": "relax"}'}],
+        },
+        "just a text answer",
+    )
+
+    result = score(None, sample)
+
+    assert result["score"] == 0.0
+    assert result["format_error"] == 1
+    assert "format" in result["feedback"]
+
+
+def test_toolalpaca_reward_truncation_has_feedback() -> None:
+    from relax.utils.types import Sample
+
+    sample = _sample(
+        {
+            "data_source": "toolalpaca",
+            "golden_answer": [{"Action": "search", "Action_Input": '{"query": "relax"}'}],
+        },
+        'Action: lookup\nAction Input: {"query": "relax"}',
+    )
+    sample.status = Sample.Status.TRUNCATED
+
+    result = score(None, sample)
+
+    assert "truncated" in result["feedback"]

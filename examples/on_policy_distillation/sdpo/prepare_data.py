@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import random
 from pathlib import Path
 from typing import Any, Iterable
 
 
+logger = logging.getLogger(__name__)
 TARGET_DOMAINS = frozenset({"Chemistry", "Physics", "Biology", "Materials"})
 
 
@@ -187,6 +190,13 @@ def normalize_rows(
     return normalized_rows
 
 
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=("sciknoweval", "toolalpaca", "tooluse"), required=True)
@@ -199,10 +209,23 @@ def main() -> None:
         help="SciKnowEval domain for the reference flat format; defaults to the input parent directory name.",
     )
     parser.add_argument("--max-rows", type=int, default=None, help="Optionally limit output rows for a smoke run.")
+    parser.add_argument(
+        "--eval-ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of normalized rows to hold out as an eval set. When >0, the held-out rows are "
+            "written to <output.parent>/eval.jsonl and the rest to --output (train). "
+            "Useful for a train/test split when only a single train source is available."
+        ),
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Seed for the eval/validation split.")
     args = parser.parse_args()
 
     if args.max_rows is not None and args.max_rows < 0:
         parser.error("--max-rows must be non-negative")
+    if not 0.0 <= args.eval_ratio < 1.0:
+        parser.error("--eval-ratio must be in [0, 1)")
 
     rows = _read_rows(args.input)
     domain = args.domain or args.input.parent.name
@@ -211,10 +234,28 @@ def main() -> None:
         normalized = normalized[: args.max_rows]
     if not normalized:
         raise ValueError(f"No rows matched dataset={args.dataset!r} from input {args.input}")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", encoding="utf-8") as handle:
-        for row in normalized:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    if args.eval_ratio > 0.0:
+        n_eval = int(round(len(normalized) * args.eval_ratio))
+        if n_eval == 0:
+            raise ValueError(
+                f"--eval-ratio {args.eval_ratio} with {len(normalized)} rows yields 0 eval rows; "
+                "raise the ratio or add more input rows."
+            )
+        rng = random.Random(args.seed)
+        indices = list(range(len(normalized)))
+        rng.shuffle(indices)
+        eval_indices = set(indices[:n_eval])
+        train_rows = [r for i, r in enumerate(normalized) if i not in eval_indices]
+        eval_rows = [r for i, r in enumerate(normalized) if i in eval_indices]
+        _write_jsonl(args.output, train_rows)
+        eval_path = args.output.with_name("eval.jsonl")
+        _write_jsonl(eval_path, eval_rows)
+        logger.info(
+            f"Split into train ({len(train_rows)} rows) and eval ({len(eval_rows)} rows); eval written to {eval_path}"
+        )
+    else:
+        _write_jsonl(args.output, normalized)
 
 
 if __name__ == "__main__":

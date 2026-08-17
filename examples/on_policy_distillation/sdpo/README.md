@@ -232,6 +232,23 @@ python3 -m examples.on_policy_distillation.sdpo.prepare_data \
 测试 split 可以用同样的命令生成，只需将输入和 `--source-split` 改为 `test`。当前训练
 launcher 默认只读取 `train.jsonl`，不会自动执行 test eval。
 
+如果只有 train 源数据、没有独立的 test 集，可以在生成时按比例留出 eval 集：
+`--eval-ratio` 会把该比例的规范化行写到 `<output>.parent/eval.jsonl`，其余写
+到 `--output`（train）。launcher 通过 `--eval-prompt-data` 指向这个 `eval.jsonl`
+即可周期性评测：
+
+```bash
+python3 -m examples.on_policy_distillation.sdpo.prepare_data \
+  --dataset sciknoweval \
+  --input <sdpo-source-root>/datasets/sciknoweval/biology/train.json \
+  --domain biology \
+  --source-split train \
+  --eval-ratio 0.1 \
+  --seed 42 \
+  --output <data-root>/SDPO/sciknoweval/biology/train.jsonl
+# 生成 <data-root>/SDPO/sciknoweval/biology/train.jsonl + eval.jsonl
+```
+
 ### ToolUse
 
 如果使用参考 SDPO 仓库中的工具调用数据：
@@ -309,20 +326,29 @@ colocate/offload 配置切换 GPU。脚本设置了 `--skip-eval-before-train`�
 
 ### SciKnowEval
 
-`reward.py` 从回答中提取 `<answer>...</answer>` 内容；如果没有 answer tag，则从回答中
-提取选项字母或使用完整回答进行比较。普通选择题会和 `metadata.answer_key` 比较，
-true/false 任务会进行归一化比较。
+`reward.py` 要求回答包含 `<answer>...</answer>` 标签并从中提取选项字母；缺失 `<answer>`
+标签即视为格式错误（score=0，即使回答里出现了正确选项）。普通选择题会和
+`metadata.answer_key` 比较，true/false 任务会进行归一化比较。
 
-失败样本得到类似以下的通用 feedback：
+三种 `SDPOFeedback`（`SciKnowEvalSDPOFeedback`、`ToolUseSDPOFeedback`、
+`CodeSDPOFeedback`）按同一套决策矩阵决定是否进蒸馏、注入什么（按优先级）：
+
+1. 自身成功（`score >= 1`）→ 注入同 `group_index`/`metadata.uid` 内成功 peer 的正确解，
+   无 peer 时用自己的解，进蒸馏；
+2. 失败但有成功 peer → 只注入 peer 的正确解（丢弃当前样本的 feedback），进蒸馏；
+3. 失败、无 peer、且是格式/截断错误 → 注入格式/截断反馈文字，进蒸馏；
+4. 失败、无 peer、普通算错 → 不注入、不进蒸馏。
+
+没有 `group_index` 时使用 `metadata.uid` 隔离；不同 group/UID 之间不会共享回答。
+
+失败样本的反馈文字只有两种（截断优先于格式错误），且都不泄露正确答案：
 
 ```text
-The attempted answer is incorrect. Recheck the reasoning and final answer.
+Your response was truncated because it exceeded the maximum length.
+Your answer had the wrong format. The solution must be given in the format: <answer>X</answer>.
 ```
 
-`SciKnowEvalSDPOFeedback`、`ToolUseSDPOFeedback` 和 `CodeSDPOFeedback` 都会优先在同一
-`group_index` 内寻找 `score >= 1` 的成功 peer；没有 `group_index` 时使用 `metadata.uid`
-隔离。成功 peer 包装为 `<successful_attempt>`，当前样本的错误信息包装为 `<feedback>`。
-同组没有 peer 时，成功样本可以使用自己的回答；不同 group/UID 之间不会共享回答。
+普通算错不产生任何反馈文字，因此这类样本只能靠同题的 peer 正确解学习。
 
 ### ToolUse 与 ToolAlpaca
 
@@ -333,10 +359,10 @@ Action: <tool name>
 Action Input: <JSON object>
 ```
 
-reward 会分别检查 tool action 和 JSON 参数；格式错误、tool 选择错误或参数不匹配都会
-产生 score=0，并生成不泄露 gold answer 的错误反馈。`ToolUseSDPOFeedback` 和
-`CodeSDPOFeedback` 会把同 group/UID 的成功工具/代码尝试注入当前样本，同时只保留当前
-样本自己的 feedback；成功样本默认也可以自引用。
+reward 分别检查 tool action 和 JSON 参数：缺失 `Action/Action Input` 格式 → 格式反馈；
+回答被截断 → 截断反馈（优先于格式）；action/input 不匹配视为普通算错 → 无反馈（不泄露
+gold）。进蒸馏的决策与 SciKnowEval 相同：成功/有成功 peer 时注入 peer 正确解；失败且
+无 peer 时只有格式/截断错误才注入反馈文字。
 
 ## 常见问题
 

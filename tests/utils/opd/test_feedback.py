@@ -53,7 +53,7 @@ def test_record_sample_feedback_uses_feedback_specific_sample_stage() -> None:
     "feedback_class_name",
     ["SciKnowEvalSDPOFeedback", "ToolUseSDPOFeedback", "CodeSDPOFeedback"],
 )
-def test_sdpo_solution_is_shared_only_inside_group_and_feedback_stays_local(feedback_class_name: str) -> None:
+def test_sdpo_peer_solution_shared_only_inside_group_and_normal_error_dropped(feedback_class_name: str) -> None:
     import relax.utils.opd.feedback as feedback_module
 
     target = _sample(7, 0, "wrong", {"score": 0.0}, env_feedback=["fix arithmetic"])
@@ -68,15 +68,11 @@ def test_sdpo_solution_is_shared_only_inside_group_and_feedback_stays_local(feed
         target.teacher_prompt[-1]["content"] if isinstance(target.teacher_prompt, list) else target.teacher_prompt
     )
     assert "correct solution" in target_text
-    assert "fix arithmetic" in target_text
+    assert "fix arithmetic" not in target_text
     assert "success details" not in target_text
-    unrelated_text = (
-        unrelated.teacher_prompt[-1]["content"]
-        if isinstance(unrelated.teacher_prompt, list)
-        else unrelated.teacher_prompt
-    )
-    assert "correct solution" not in unrelated_text
-    assert "unrelated feedback" in unrelated_text
+    assert unrelated.teacher_prompt == unrelated.prompt
+    assert unrelated.opd_sample_mask is False
+    assert "unrelated feedback" not in str(unrelated.teacher_prompt)
 
 
 @pytest.mark.parametrize(
@@ -129,6 +125,49 @@ def test_sdpo_fallback_copies_original_message_prompt() -> None:
 
     assert sample.teacher_prompt == prompt
     assert sample.teacher_prompt is not prompt
+    assert sample.opd_sample_mask is False
+
+
+@pytest.mark.parametrize(
+    "feedback_class_name",
+    ["SciKnowEvalSDPOFeedback", "ToolUseSDPOFeedback", "CodeSDPOFeedback"],
+)
+def test_sdpo_format_error_without_peer_injects_feedback(feedback_class_name: str) -> None:
+    import relax.utils.opd.feedback as feedback_module
+
+    sample = _sample(12, 0, "wrong", {"score": 0.0, "format_error": 1, "feedback": "wrong format message"})
+    getattr(feedback_module, feedback_class_name)().prepare_teacher_prompts([sample], [sample.reward])
+
+    assert "wrong format message" in str(sample.teacher_prompt)
+    assert sample.opd_sample_mask is True
+
+
+@pytest.mark.parametrize(
+    "feedback_class_name",
+    ["SciKnowEvalSDPOFeedback", "ToolUseSDPOFeedback", "CodeSDPOFeedback"],
+)
+def test_sdpo_truncation_without_peer_injects_feedback(feedback_class_name: str) -> None:
+    import relax.utils.opd.feedback as feedback_module
+
+    sample = _sample(13, 0, "truncated", {"score": 0.0, "feedback": "truncation message"})
+    sample.status = Sample.Status.TRUNCATED
+    getattr(feedback_module, feedback_class_name)().prepare_teacher_prompts([sample], [sample.reward])
+
+    assert "truncation message" in str(sample.teacher_prompt)
+    assert sample.opd_sample_mask is True
+
+
+@pytest.mark.parametrize(
+    "feedback_class_name",
+    ["SciKnowEvalSDPOFeedback", "ToolUseSDPOFeedback", "CodeSDPOFeedback"],
+)
+def test_sdpo_normal_wrong_without_peer_drops_feedback_and_skips_distillation(feedback_class_name: str) -> None:
+    import relax.utils.opd.feedback as feedback_module
+
+    sample = _sample(14, 0, "wrong", {"score": 0.0, "feedback": "generic wrong-answer feedback"})
+    getattr(feedback_module, feedback_class_name)().prepare_teacher_prompts([sample], [sample.reward])
+
+    assert sample.teacher_prompt == sample.prompt
     assert sample.opd_sample_mask is False
 
 
@@ -193,7 +232,7 @@ def test_tool_and_code_feedback_share_peer_solutions(feedback_class_name: str) -
 
     teacher_text = str(failed.teacher_prompt)
     assert "successful attempt" in teacher_text
-    assert "fix the tool call" in teacher_text
+    assert "fix the tool call" not in teacher_text
     assert failed.opd_sample_mask is True
 
 

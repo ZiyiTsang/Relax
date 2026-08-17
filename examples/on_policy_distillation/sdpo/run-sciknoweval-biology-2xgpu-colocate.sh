@@ -3,16 +3,18 @@
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
-source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
-source scripts/models/qwen3-4B-Instruct-2507.sh
+source scripts/models/qwen3-8B.sh
 
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
 export RELAX_OPD_PER_POS_TOKEN_IDS=1
 
+export WANDB_API_KEY="${WANDB_API_KEY:?Set WANDB_API_KEY}"
+
 student_model="${STUDENT_MODEL_PATH:?Set STUDENT_MODEL_PATH}"
 teacher_model="${TEACHER_MODEL_PATH:-${student_model}}"
 data_path="${DATA_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/biology/train.jsonl}"
+eval_path="${EVAL_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/biology/eval.jsonl}"
 now="$(date '+%Y-%m-%d-%H:%M:%S')"
 experiment_name="${EXPERIMENT_NAME:-sdpo-sciknoweval-biology-${now}}"
 
@@ -30,17 +32,20 @@ ROLLOUT_ARGS=(
     --group-rm
     --custom-rm-path examples.on_policy_distillation.sdpo.reward.score
     --reward-key score
-    --num-rollout 50
+    --num-rollout 100
     --rollout-batch-size 4
     --n-samples-per-prompt 8
     --global-batch-size 32
-    --rollout-max-prompt-len 2096
+    --rollout-max-prompt-len 2048
     --rollout-max-response-len 8192
     --rollout-temperature 1.0
     --use-fault-tolerance
 )
 
 EVAL_ARGS=(
+    --eval-interval 10
+    --eval-prompt-data "sciknoweval-biology ${eval_path}"
+    --n-samples-per-eval-prompt 16
     --skip-eval-before-train
 )
 
@@ -82,7 +87,6 @@ PERF_ARGS=(
     --tensor-model-parallel-size 2
     --context-parallel-size 1
     --pipeline-model-parallel-size 1
-    --sequence-parallel
     --calculate-per-token-loss
     --use-dynamic-batch-size
     --max-tokens-per-gpu 18944
@@ -107,8 +111,16 @@ MISC_ARGS=(
     --tb-experiment-name "${experiment_name}"
 )
 
+WANDB_ARGS=(
+    --use-wandb
+    --wandb-project relax-sdpo
+    --wandb-group "${WANDB_RUN_GROUP:-sdpo-sciknoweval-biology}"
+    --wandb-key "${WANDB_API_KEY}"
+)
+
 exec python -m relax.entrypoints.train \
     "${MODEL_ARGS[@]}" \
     "${CKPT_ARGS[@]}" "${ROLLOUT_ARGS[@]}" "${EVAL_ARGS[@]}" \
     "${OPD_ARGS[@]}" "${GRPO_ARGS[@]}" "${OPTIMIZER_ARGS[@]}" \
-    "${PERF_ARGS[@]}" "${SGLANG_ARGS[@]}" "${MISC_ARGS[@]}"
+    "${PERF_ARGS[@]}" "${SGLANG_ARGS[@]}" "${MISC_ARGS[@]}" \
+    "${WANDB_ARGS[@]}"

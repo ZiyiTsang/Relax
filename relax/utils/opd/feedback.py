@@ -104,6 +104,15 @@ def _is_successful_reward(reward: Any) -> bool:
         return False
 
 
+def _is_format_or_truncation_error(sample: Sample, reward: Any) -> bool:
+    if isinstance(reward, dict) and reward.get("format_error"):
+        return True
+    status = getattr(sample, "status", None)
+    if status is not None:
+        return str(getattr(status, "value", status)).casefold() == "truncated"
+    return False
+
+
 def _sdpo_group_key(sample: Sample, position: int) -> Any:
     if sample.group_index is not None:
         return ("group", sample.group_index)
@@ -125,14 +134,19 @@ def _prepare_sdpo_teacher_prompts(group: list[Sample], rewards: list[Any]) -> No
     }
     for key, samples in by_group.items():
         for sample in samples:
+            reward = reward_by_id[id(sample)]
+            is_success = _is_successful_reward(reward)
             peer = next((candidate for candidate in successful[key] if candidate is not sample), None)
-            source = peer or next((candidate for candidate in successful[key] if candidate is sample), None)
             additions = []
-            if source is not None:
+            if is_success:
+                source = peer or sample
                 additions.append(f"<successful_attempt>\n{source.response}\n</successful_attempt>")
-            feedback = EnvironmentFeedback.feedback_text(sample, reward_by_id[id(sample)])
-            if feedback:
-                additions.append(f"<feedback>\n{feedback}\n</feedback>")
+            elif peer is not None:
+                additions.append(f"<successful_attempt>\n{peer.response}\n</successful_attempt>")
+            elif _is_format_or_truncation_error(sample, reward):
+                feedback = EnvironmentFeedback.feedback_text(sample, reward)
+                if feedback:
+                    additions.append(f"<feedback>\n{feedback}\n</feedback>")
             _set_sdpo_teacher_prompt(sample, additions)
 
 

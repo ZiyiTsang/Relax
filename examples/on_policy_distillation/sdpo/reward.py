@@ -15,16 +15,26 @@ def _metadata(sample: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _was_truncated(sample: Any) -> bool:
+    status = getattr(sample, "status", None)
+    if status is None:
+        return False
+    return str(getattr(status, "value", status)).casefold() == "truncated"
+
+
 def _normalize(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value).strip()).casefold()
 
 
-def _extract_answer(response: str) -> str:
+def _extract_answer(response: str) -> tuple[str, bool]:
     tagged = re.findall(r"<answer>\s*(.*?)\s*</answer>", response, flags=re.IGNORECASE | re.DOTALL)
-    candidate = tagged[-1] if tagged else response
-    candidate = candidate.strip()
+    if not tagged:
+        candidate = response.strip()
+        match = re.search(r"\b([A-D])\b", candidate, flags=re.IGNORECASE)
+        return (match.group(1).upper() if match else candidate), False
+    candidate = tagged[-1].strip()
     match = re.search(r"\b([A-D])\b", candidate, flags=re.IGNORECASE)
-    return match.group(1).upper() if match else candidate
+    return (match.group(1).upper() if match else candidate), True
 
 
 def _score_sciknoweval(sample: Any) -> dict[str, Any]:
@@ -32,18 +42,24 @@ def _score_sciknoweval(sample: Any) -> dict[str, Any]:
     expected = metadata.get("answer_key", getattr(sample, "label", ""))
     task_type = str(metadata.get("task_type", "")).casefold()
     response = getattr(sample, "response", "")
-    predicted = _extract_answer(response)
+    predicted, has_format = _extract_answer(response)
+    incorrect_format = int(not has_format)
 
     if "true_or_false" in task_type or "true/false" in task_type:
         correct = _normalize(predicted) in {_normalize(expected), _normalize(str(expected).replace(" ", ""))}
     else:
         correct = _normalize(predicted) == _normalize(expected)
 
-    feedback = "" if correct else "The attempted answer is incorrect. Recheck the reasoning and final answer."
+    if _was_truncated(sample):
+        feedback = "Your response was truncated because it exceeded the maximum length."
+    elif incorrect_format:
+        feedback = "Your answer had the wrong format. The solution must be given in the format: <answer>X</answer>."
+    else:
+        feedback = ""
     return {
-        "score": 1.0 if correct else 0.0,
+        "score": 1.0 if correct and not incorrect_format else 0.0,
         "predicted": predicted,
-        "format_error": int(not bool(predicted)),
+        "format_error": incorrect_format,
         "feedback": feedback,
     }
 
@@ -96,19 +112,18 @@ def _score_toolalpaca(sample: Any) -> dict[str, Any]:
     actions_correct = Counter(predicted_actions) == Counter(expected_actions)
     inputs_correct = predicted_inputs == expected_inputs
     correct = format_ok and actions_correct and inputs_correct
-    feedback_parts = []
-    if not actions_correct:
-        feedback_parts.append("The selected tool action does not match the request.")
-    if not inputs_correct:
-        feedback_parts.append("The tool input arguments do not match the request.")
-    if not format_ok:
-        feedback_parts.append("Use the required Action and Action Input format.")
+    if _was_truncated(sample):
+        feedback = "Your response was truncated because it exceeded the maximum length."
+    elif not format_ok:
+        feedback = "Use the required Action and Action Input format."
+    else:
+        feedback = ""
     return {
         "score": 1.0 if correct else 0.0,
         "predicted_actions": predicted_actions,
         "predicted_inputs": predicted_inputs,
         "format_error": int(not format_ok),
-        "feedback": " ".join(feedback_parts),
+        "feedback": feedback,
     }
 
 

@@ -225,7 +225,6 @@ def get_model_provider_func(
             "attention_softmax_in_fp32",
             "masked_softmax_fusion",
             "bias_dropout_fusion",
-            "apply_rope_fusion",
             "recompute_granularity",
             "recompute_method",
             "recompute_num_layers",
