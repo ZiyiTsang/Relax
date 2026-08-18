@@ -30,10 +30,10 @@ ROLLOUT_ARGS=(
     --group-rm
     --custom-rm-path examples.on_policy_distillation.sdpo.reward.score
     --reward-key score
-    --num-rollout 2
-    --rollout-batch-size 1
-    --n-samples-per-prompt 2
-    --global-batch-size 2
+    --num-rollout 100
+    --rollout-batch-size 4
+    --n-samples-per-prompt 8
+    --global-batch-size 32
     --rollout-max-prompt-len 2096
     --rollout-max-response-len 8192
     --rollout-temperature 1.0

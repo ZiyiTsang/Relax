@@ -37,7 +37,7 @@ ROLLOUT_ARGS=(
     --n-samples-per-prompt 8
     --global-batch-size 32
     --rollout-max-prompt-len 2048
-    --rollout-max-response-len 8192
+    --rollout-max-response-len 2048
     --rollout-temperature 1.0
     --use-fault-tolerance
 )
@@ -64,7 +64,7 @@ OPD_ARGS=(
     --opd-kl-type jsd
     --opd-jsd-alpha 0.5
     --opd-norm-mode tail
-    --opd-teacher-timeout-s 120
+    --opd-teacher-timeout-s 600
     --use-rollout-logprobs
     # --sdpo-teacher-update-mode ema
     # --sdpo-teacher-ema-alpha 0.01
@@ -90,8 +90,14 @@ PERF_ARGS=(
     --context-parallel-size 1
     --pipeline-model-parallel-size 1
     --calculate-per-token-loss
-    --use-dynamic-batch-size
-    --max-tokens-per-gpu 18944
+    --no-masked-softmax-fusion
+    --optimizer-cpu-offload
+    --use-precision-aware-optimizer
+    --recompute-granularity full
+    --recompute-method uniform
+    --recompute-num-layers 1
+    --qkv-format bshd
+    --micro-batch-size 1
 )
 
 SGLANG_ARGS=(
