@@ -33,11 +33,11 @@ ROLLOUT_ARGS=(
     --custom-rm-path examples.on_policy_distillation.sdpo.reward.score
     --reward-key score
     --num-rollout 100
-    --rollout-batch-size 4
+    --rollout-batch-size 32
     --n-samples-per-prompt 8
-    --global-batch-size 32
+    --global-batch-size 256
     --rollout-max-prompt-len 2048
-    --rollout-max-response-len 2048
+    --rollout-max-response-len 8192
     --rollout-temperature 1.0
     --use-fault-tolerance
 )
@@ -45,7 +45,7 @@ ROLLOUT_ARGS=(
 EVAL_ARGS=(
     --eval-interval 10
     --eval-prompt-data "sciknoweval-chemistry ${eval_path}"
-    --n-samples-per-eval-prompt 16
+    --n-samples-per-eval-prompt 8
     --skip-eval-before-train
 )
 
@@ -60,7 +60,7 @@ OPD_ARGS=(
     --opd-kl-coef 0.0
     --opd-disable-rl-reward
     --opd-token-selection student_topk
-    --opd-log-prob-top-k 100
+    --opd-log-prob-top-k 16
     --opd-kl-type jsd
     --opd-jsd-alpha 0.5
     --opd-norm-mode tail
@@ -86,7 +86,7 @@ OPTIMIZER_ARGS=(
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size 2
+    --tensor-model-parallel-size 4
     --context-parallel-size 1
     --pipeline-model-parallel-size 1
     --calculate-per-token-loss
@@ -101,21 +101,22 @@ PERF_ARGS=(
 )
 
 SGLANG_ARGS=(
-    --rollout-num-gpus 1
+    --rollout-num-gpus 3
     --rollout-num-gpus-per-engine 1
     --sglang-load-format dummy
     --sglang-mem-fraction-static 0.45
 )
 
 MISC_ARGS=(
-    --resource '{"actor": [1, 2], "rollout": [1, 1], "teacher": [1, 1]}'
+    --resource '{"actor": [1, 4], "rollout": [3, 1], "teacher": [1, 1]}'
     --max-staleness 0
     --num-data-storage-units 1
     --colocate
     --offload
+    --selective-offload
     --use-health-check
-    --actor-num-gpus-per-node 2
-    --num-gpus-per-node 2
+    --actor-num-gpus-per-node 4
+    --num-gpus-per-node 4
     --tb-experiment-name "${experiment_name}"
 )
 

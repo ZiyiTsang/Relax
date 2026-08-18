@@ -56,3 +56,4 @@ tensorboard_log
 env.sh
 configs/env.yaml
 wandb/
+scripts/training/sdpo/

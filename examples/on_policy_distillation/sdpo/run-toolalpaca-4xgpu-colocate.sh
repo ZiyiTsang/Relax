@@ -13,10 +13,9 @@ export WANDB_API_KEY="${WANDB_API_KEY:?Set WANDB_API_KEY}"
 
 student_model="${STUDENT_MODEL_PATH:?Set STUDENT_MODEL_PATH}"
 teacher_model="${TEACHER_MODEL_PATH:-${student_model}}"
-data_path="${DATA_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/biology/train.jsonl}"
-eval_path="${EVAL_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/biology/eval.jsonl}"
+data_path="${DATA_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/toolalpaca/train.jsonl}"
 now="$(date '+%Y-%m-%d-%H:%M:%S')"
-experiment_name="${EXPERIMENT_NAME:-sdpo-sciknoweval-biology-${now}}"
+experiment_name="${EXPERIMENT_NAME:-sdpo-toolalpaca-${now}}"
 
 CKPT_ARGS=(
     --hf-checkpoint "${student_model}"
@@ -33,25 +32,22 @@ ROLLOUT_ARGS=(
     --custom-rm-path examples.on_policy_distillation.sdpo.reward.score
     --reward-key score
     --num-rollout 100
-    --rollout-batch-size 4
+    --rollout-batch-size 32
     --n-samples-per-prompt 8
-    --global-batch-size 32
+    --global-batch-size 256
     --rollout-max-prompt-len 2048
-    --rollout-max-response-len 2048
+    --rollout-max-response-len 8192
     --rollout-temperature 1.0
     --use-fault-tolerance
 )
 
 EVAL_ARGS=(
-    --eval-interval 10
-    --eval-prompt-data "sciknoweval-biology ${eval_path}"
-    --n-samples-per-eval-prompt 16
     --skip-eval-before-train
 )
 
 OPD_ARGS=(
     --use-opd
-    --opd-feedback-class "relax.utils.opd.feedback.SciKnowEvalSDPOFeedback"
+    --opd-feedback-class "relax.utils.opd.feedback.ToolUseSDPOFeedback"
     --opd-type sglang
     --teacher-hf-checkpoint "${teacher_model}"
     --teacher-num-gpus-per-engine 1
@@ -60,7 +56,7 @@ OPD_ARGS=(
     --opd-kl-coef 0.0
     --opd-disable-rl-reward
     --opd-token-selection student_topk
-    --opd-log-prob-top-k 100
+    --opd-log-prob-top-k 16
     --opd-kl-type jsd
     --opd-jsd-alpha 0.5
     --opd-norm-mode tail
@@ -86,7 +82,7 @@ OPTIMIZER_ARGS=(
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size 2
+    --tensor-model-parallel-size 4
     --context-parallel-size 1
     --pipeline-model-parallel-size 1
     --calculate-per-token-loss
@@ -101,28 +97,29 @@ PERF_ARGS=(
 )
 
 SGLANG_ARGS=(
-    --rollout-num-gpus 1
+    --rollout-num-gpus 3
     --rollout-num-gpus-per-engine 1
     --sglang-load-format dummy
     --sglang-mem-fraction-static 0.45
 )
 
 MISC_ARGS=(
-    --resource '{"actor": [1, 2], "rollout": [1, 1], "teacher": [1, 1]}'
+    --resource '{"actor": [1, 4], "rollout": [3, 1], "teacher": [1, 1]}'
     --max-staleness 0
     --num-data-storage-units 1
     --colocate
     --offload
+    --selective-offload
     --use-health-check
-    --actor-num-gpus-per-node 2
-    --num-gpus-per-node 2
+    --actor-num-gpus-per-node 4
+    --num-gpus-per-node 4
     --tb-experiment-name "${experiment_name}"
 )
 
 WANDB_ARGS=(
     --use-wandb
     --wandb-project relax-sdpo
-    --wandb-group "${WANDB_RUN_GROUP:-sdpo-sciknoweval-biology}"
+    --wandb-group "${WANDB_RUN_GROUP:-sdpo-toolalpaca}"
     --wandb-key "${WANDB_API_KEY}"
 )
 

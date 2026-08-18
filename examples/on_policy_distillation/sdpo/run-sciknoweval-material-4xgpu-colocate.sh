@@ -3,18 +3,20 @@
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
-source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
-source scripts/models/qwen3-4B-Instruct-2507.sh
+source scripts/models/qwen3-8B.sh
 
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
 export RELAX_OPD_PER_POS_TOKEN_IDS=1
 
+export WANDB_API_KEY="${WANDB_API_KEY:?Set WANDB_API_KEY}"
+
 student_model="${STUDENT_MODEL_PATH:?Set STUDENT_MODEL_PATH}"
 teacher_model="${TEACHER_MODEL_PATH:-${student_model}}"
-data_path="${DATA_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/physics/train.jsonl}"
+data_path="${DATA_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/material/train.jsonl}"
+eval_path="${EVAL_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/material/eval.jsonl}"
 now="$(date '+%Y-%m-%d-%H:%M:%S')"
-experiment_name="${EXPERIMENT_NAME:-sdpo-sciknoweval-physics-${now}}"
+experiment_name="${EXPERIMENT_NAME:-sdpo-sciknoweval-material-${now}}"
 
 CKPT_ARGS=(
     --hf-checkpoint "${student_model}"
@@ -31,16 +33,19 @@ ROLLOUT_ARGS=(
     --custom-rm-path examples.on_policy_distillation.sdpo.reward.score
     --reward-key score
     --num-rollout 100
-    --rollout-batch-size 4
+    --rollout-batch-size 32
     --n-samples-per-prompt 8
-    --global-batch-size 32
-    --rollout-max-prompt-len 2096
+    --global-batch-size 256
+    --rollout-max-prompt-len 2048
     --rollout-max-response-len 8192
     --rollout-temperature 1.0
     --use-fault-tolerance
 )
 
 EVAL_ARGS=(
+    --eval-interval 10
+    --eval-prompt-data "sciknoweval-material ${eval_path}"
+    --n-samples-per-eval-prompt 8
     --skip-eval-before-train
 )
 
@@ -55,11 +60,11 @@ OPD_ARGS=(
     --opd-kl-coef 0.0
     --opd-disable-rl-reward
     --opd-token-selection student_topk
-    --opd-log-prob-top-k 100
+    --opd-log-prob-top-k 16
     --opd-kl-type jsd
     --opd-jsd-alpha 0.5
     --opd-norm-mode tail
-    --opd-teacher-timeout-s 120
+    --opd-teacher-timeout-s 600
     --use-rollout-logprobs
     # --sdpo-teacher-update-mode ema
     # --sdpo-teacher-ema-alpha 0.01
@@ -81,36 +86,50 @@ OPTIMIZER_ARGS=(
 )
 
 PERF_ARGS=(
-    --tensor-model-parallel-size 2
+    --tensor-model-parallel-size 4
     --context-parallel-size 1
     --pipeline-model-parallel-size 1
-    --sequence-parallel
     --calculate-per-token-loss
-    --use-dynamic-batch-size
-    --max-tokens-per-gpu 18944
+    --no-masked-softmax-fusion
+    --optimizer-cpu-offload
+    --use-precision-aware-optimizer
+    --recompute-granularity full
+    --recompute-method uniform
+    --recompute-num-layers 1
+    --qkv-format bshd
+    --micro-batch-size 1
 )
 
 SGLANG_ARGS=(
-    --rollout-num-gpus 1
+    --rollout-num-gpus 3
     --rollout-num-gpus-per-engine 1
     --sglang-load-format dummy
     --sglang-mem-fraction-static 0.45
 )
 
 MISC_ARGS=(
-    --resource '{"actor": [1, 2], "rollout": [1, 1], "teacher": [1, 1]}'
+    --resource '{"actor": [1, 4], "rollout": [3, 1], "teacher": [1, 1]}'
     --max-staleness 0
     --num-data-storage-units 1
     --colocate
     --offload
+    --selective-offload
     --use-health-check
-    --actor-num-gpus-per-node 2
-    --num-gpus-per-node 2
+    --actor-num-gpus-per-node 4
+    --num-gpus-per-node 4
     --tb-experiment-name "${experiment_name}"
+)
+
+WANDB_ARGS=(
+    --use-wandb
+    --wandb-project relax-sdpo
+    --wandb-group "${WANDB_RUN_GROUP:-sdpo-sciknoweval-material}"
+    --wandb-key "${WANDB_API_KEY}"
 )
 
 exec python -m relax.entrypoints.train \
     "${MODEL_ARGS[@]}" \
     "${CKPT_ARGS[@]}" "${ROLLOUT_ARGS[@]}" "${EVAL_ARGS[@]}" \
     "${OPD_ARGS[@]}" "${GRPO_ARGS[@]}" "${OPTIMIZER_ARGS[@]}" \
-    "${PERF_ARGS[@]}" "${SGLANG_ARGS[@]}" "${MISC_ARGS[@]}"
+    "${PERF_ARGS[@]}" "${SGLANG_ARGS[@]}" "${MISC_ARGS[@]}" \
+    "${WANDB_ARGS[@]}"
