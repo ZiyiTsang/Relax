@@ -822,14 +822,14 @@ def get_data_iterator(
             f"num_local_samples={num_local_samples}, num_steps_per_rollout={num_steps_per_rollout}"
         )
 
-    if step_local_sample_counts is None:
-        step_local_sample_counts = [num_local_gbs for _ in range(num_steps_per_rollout)]
-
     def _generate_data_iterator(rollout_data, micro_batch_size, micro_batch_indices=None, max_tokens_per_gpu=None):
         data_iterator = []
         for _ in range(vpp_size):
             data_iterator.append(DataIterator(rollout_data, micro_batch_size, micro_batch_indices, max_tokens_per_gpu))
         return data_iterator
+
+    if step_local_sample_counts is None:
+        step_local_sample_counts = [num_local_gbs for _ in range(num_steps_per_rollout)]
 
     if not args.use_dynamic_batch_size:
         invalid_counts = [count for count in step_local_sample_counts if count % args.micro_batch_size != 0]

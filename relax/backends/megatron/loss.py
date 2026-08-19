@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Relax Authors. All Rights Reserved.
-
 from argparse import Namespace
 from collections.abc import Callable, Iterator
 from functools import partial
@@ -1297,24 +1295,6 @@ def sft_loss_function_chunked(
     return loss, {"loss": loss.clone().detach()}
 
 
-def _get_loss_num_tokens(
-    batch: RolloutBatch,
-    args: Namespace,
-) -> torch.Tensor:
-    """Return the CP-local count for the original response loss mask."""
-
-    return get_cp_local_num_tokens(
-        batch["total_lengths"],
-        batch["response_lengths"],
-        batch["loss_masks"],
-        args.qkv_format,
-        batch.get("max_seq_lens", None),
-        batch.get("padded_total_lengths", None),
-        dynamic_cp_size=batch.get("dynamic_cp_size", None),
-        dynamic_cp_rank=batch.get("dynamic_cp_rank", None),
-    )
-
-
 def loss_function(
     args: Namespace,
     batch: RolloutBatch,
@@ -1358,7 +1338,16 @@ def loss_function(
     # normalizer is correct even when CP differs across micro-batches (dynamic CP).
     # Under static CP it equals the old full-sample count distributed across ranks,
     # so the final loss/grad/metric are unchanged after all-reduce.
-    num_tokens = _get_loss_num_tokens(batch, args)
+    num_tokens = get_cp_local_num_tokens(
+        batch["total_lengths"],
+        batch["response_lengths"],
+        batch["loss_masks"],
+        args.qkv_format,
+        batch.get("max_seq_lens", None),
+        batch.get("padded_total_lengths", None),
+        dynamic_cp_size=batch.get("dynamic_cp_size", None),
+        dynamic_cp_rank=batch.get("dynamic_cp_rank", None),
+    )
     num_samples = len(batch["response_lengths"])
 
     sum_of_sample_mean = get_sum_of_sample_mean(

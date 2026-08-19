@@ -32,9 +32,9 @@ ROLLOUT_ARGS=(
     --custom-rm-path examples.on_policy_distillation.sdpo.reward.score
     --reward-key score
     --num-rollout 100
-    --rollout-batch-size 32
+    --rollout-batch-size 8
     --n-samples-per-prompt 8
-    --global-batch-size 256
+    --global-batch-size 32
     --rollout-max-prompt-len 2048
     --rollout-max-response-len 8192
     --rollout-temperature 1.0
@@ -88,6 +88,7 @@ PERF_ARGS=(
     --calculate-per-token-loss
     --no-masked-softmax-fusion
     --optimizer-cpu-offload
+    --selective-offload
     --use-precision-aware-optimizer
     --recompute-granularity full
     --recompute-method uniform
@@ -104,12 +105,11 @@ SGLANG_ARGS=(
 )
 
 MISC_ARGS=(
-    --resource '{"actor": [1, 4], "rollout": [3, 1], "teacher": [1, 1]}'
+    --resource '{"actor": [1, 4], "rollout": [1, 3], "teacher": [1, 1]}'
     --max-staleness 0
     --num-data-storage-units 1
     --colocate
-    --offload
-    --selective-offload
+    --train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}'
     --use-health-check
     --actor-num-gpus-per-node 4
     --num-gpus-per-node 4
