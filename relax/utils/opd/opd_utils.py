@@ -86,24 +86,6 @@ def is_managed_opd_teacher_colocate(args: Any) -> bool:
     )
 
 
-def is_sdpo_teacher_ema_enabled(args: Any) -> bool:
-    feedback_class = getattr(args, "opd_feedback_class", None)
-    is_sdpo = False
-    if feedback_class:
-        try:
-            from relax.utils.opd.feedback import load_feedback_class
-
-            is_sdpo = bool(getattr(load_feedback_class(feedback_class), "is_sdpo_feedback", False))
-        except (ImportError, TypeError, ValueError):
-            is_sdpo = False
-    return (
-        getattr(args, "use_opd", False)
-        and getattr(args, "sdpo_teacher_update_mode", "static") == "ema"
-        and getattr(args, "group_rm", False)
-        and is_sdpo
-    )
-
-
 def is_sdpo_prompt_routing_enabled(args: Any) -> bool:
     """Whether reward-completed groups should build privileged teacher
     prompts."""
@@ -529,19 +511,6 @@ def add_opd_arguments(parser: Any) -> Any:
         default=0.0,
         help=("On-policy distillation KL coefficient, Default 0.0."),
     )
-    parser.add_argument(
-        "--sdpo-teacher-update-mode",
-        type=str,
-        choices=("static", "ema"),
-        default="static",
-        help="SDPO teacher update mode. 'static' keeps the initial teacher; 'ema' updates it after each actor step.",
-    )
-    parser.add_argument(
-        "--sdpo-teacher-ema-alpha",
-        type=float,
-        default=0.01,
-        help="EMA mixing rate for the new actor weights in SDPO EMA mode. Must be in (0, 1].",
-    )
 
     parser.add_argument(
         "--opd-only-reward",
@@ -745,12 +714,8 @@ def add_opd_arguments(parser: Any) -> Any:
 
 def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> None:
     if is_sft:
-        if getattr(args, "sdpo_teacher_update_mode", "static") == "ema":
-            raise ValueError("SDPO EMA is only available for on-policy RL training, not SFT.")
         return
 
-    if getattr(args, "sdpo_teacher_update_mode", "static") == "ema" and not getattr(args, "use_opd", False):
-        raise ValueError("--sdpo-teacher-update-mode=ema requires --use-opd.")
     if not getattr(args, "use_opd", False):
         return
 
@@ -781,22 +746,8 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
                 "use the standard zig-zag context-parallel layout."
             )
 
-    teacher_update_mode = getattr(args, "sdpo_teacher_update_mode", "static")
-    if teacher_update_mode not in ("static", "ema"):
-        raise ValueError(f"--sdpo-teacher-update-mode must be 'static' or 'ema', got {teacher_update_mode!r}.")
-    if teacher_update_mode == "ema":
-        try:
-            valid_ema_alpha = 0 < float(getattr(args, "sdpo_teacher_ema_alpha", 0.01)) <= 1
-        except (TypeError, ValueError):
-            valid_ema_alpha = False
-        if not valid_ema_alpha:
-            raise ValueError(
-                f"--sdpo-teacher-ema-alpha must be in (0, 1], got {getattr(args, 'sdpo_teacher_ema_alpha', None)}."
-            )
     prompt_routing = is_sdpo_prompt_routing_enabled(args)
-    if prompt_routing or teacher_update_mode == "ema":
-        if teacher_update_mode == "ema" and not prompt_routing:
-            raise ValueError("SDPO EMA requires --group-rm and an SDPO feedback class.")
+    if prompt_routing:
         if args.opd_type != "sglang":
             raise ValueError("SDPO prompt routing requires --opd-type=sglang.")
         if int(getattr(args, "pipeline_model_parallel_size", 1)) != 1:
@@ -816,37 +767,6 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             for field_name in ("opd_teacher_image_key", "opd_teacher_video_key", "opd_teacher_audio_key")
         ):
             raise ValueError("SDPO prompt routing only supports text inputs; multimodal fields are not supported.")
-        if teacher_update_mode == "ema":
-            if getattr(args, "teacher_hf_checkpoint", None) is None:
-                raise ValueError(
-                    "--sdpo-teacher-update-mode=ema requires a managed single teacher via --teacher-hf-checkpoint."
-                )
-            if getattr(args, "opd_teacher_routes", None) is not None:
-                raise ValueError("SDPO EMA does not support --opd-teacher-routes/MOPD.")
-            if getattr(args, "opd_teacher_url", None) is not None:
-                raise ValueError("SDPO EMA does not support an external --opd-teacher-url teacher.")
-            if not getattr(args, "colocate", False):
-                raise ValueError("SDPO EMA currently requires --colocate with a managed teacher.")
-            if getattr(args, "hybrid", False):
-                raise ValueError("SDPO EMA does not support --hybrid mode.")
-            if getattr(args, "fully_async", False):
-                raise ValueError("SDPO EMA does not support fully asynchronous training.")
-            if getattr(args, "train_backend", "megatron") != "megatron":
-                raise ValueError("SDPO EMA currently requires the Megatron training backend.")
-            resource = getattr(args, "resource", None)
-            if not isinstance(resource, dict) or "teacher" not in resource:
-                raise ValueError("SDPO EMA requires a managed teacher resource entry.")
-            if not is_managed_opd_teacher_colocate(args):
-                raise ValueError(
-                    "SDPO EMA requires a single Relax-managed colocated SGLang teacher with actor and rollout resources."
-                )
-            # SDPO EMA needs the multi-tag backuper (actor + actor_ema snapshots);
-            # force it on so users do not have to opt in explicitly.
-            args.enable_weights_backuper = True
-            from relax.utils.megatron_peft_utils import is_lora_enabled
-
-            if is_lora_enabled(args):
-                raise ValueError("SDPO EMA currently supports full-model training only; LoRA is not supported.")
 
     kl_type = args.opd_kl_type
     if token_selection == "student_sampled" and kl_type not in ("reverse_kl", "low_var_kl"):
@@ -868,8 +788,8 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             "Use --opd-kl-coef=X --opd-loss-coef=0.0 for advantage mode, or "
             "--opd-kl-coef=0.0 --opd-loss-coef=X for loss mode."
         )
-    if (prompt_routing or teacher_update_mode == "ema") and (opd_kl_coef != 0.0 or opd_loss_coef <= 0.0):
-        raise ValueError("SDPO loss and EMA teacher mode require --opd-kl-coef=0 and a positive --opd-loss-coef.")
+    if prompt_routing and (opd_kl_coef != 0.0 or opd_loss_coef <= 0.0):
+        raise ValueError("SDPO loss and prompt-routing teacher mode require --opd-kl-coef=0 and a positive --opd-loss-coef.")
 
     if getattr(args, "opd_teacher_prompt_key", None) is not None:
         if args.opd_type != "sglang":
