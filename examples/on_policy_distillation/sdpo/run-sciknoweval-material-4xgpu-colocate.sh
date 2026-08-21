@@ -21,6 +21,7 @@ experiment_name="${EXPERIMENT_NAME:-sdpo-sciknoweval-material-${now}}"
 CKPT_ARGS=(
     --hf-checkpoint "${student_model}"
     --megatron-to-hf-mode bridge
+    --attention-backend flash
 )
 
 ROLLOUT_ARGS=(
@@ -44,7 +45,7 @@ ROLLOUT_ARGS=(
 
 EVAL_ARGS=(
     --eval-interval 10
-    --eval-prompt-data "sciknoweval-material ${eval_path}"
+    --eval-prompt-data sciknoweval-material "${eval_path}"
     --n-samples-per-eval-prompt 8
     --skip-eval-before-train
 )

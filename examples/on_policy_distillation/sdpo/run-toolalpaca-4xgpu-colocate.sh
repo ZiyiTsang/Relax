@@ -20,6 +20,7 @@ experiment_name="${EXPERIMENT_NAME:-sdpo-toolalpaca-${now}}"
 CKPT_ARGS=(
     --hf-checkpoint "${student_model}"
     --megatron-to-hf-mode bridge
+    --attention-backend flash
 )
 
 ROLLOUT_ARGS=(
