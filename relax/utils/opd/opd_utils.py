@@ -143,6 +143,9 @@ def build_teacher_overrides(args: Any, colocate_sync: bool = False) -> dict[str,
     overrides["model_path"] = args.teacher_hf_checkpoint
     overrides.setdefault("load_format", "auto")
     overrides.setdefault("enable_memory_saver", colocate_sync)
+    if overrides.get("enable_memory_saver"):
+        # Release/resume without a CPU backup leaves weight pages uninitialized (uniform output).
+        overrides.setdefault("enable_weights_cpu_backup", True)
     return overrides
 
 
