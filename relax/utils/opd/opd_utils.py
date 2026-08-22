@@ -789,7 +789,9 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             "--opd-kl-coef=0.0 --opd-loss-coef=X for loss mode."
         )
     if prompt_routing and (opd_kl_coef != 0.0 or opd_loss_coef <= 0.0):
-        raise ValueError("SDPO loss and prompt-routing teacher mode require --opd-kl-coef=0 and a positive --opd-loss-coef.")
+        raise ValueError(
+            "SDPO loss and prompt-routing teacher mode require --opd-kl-coef=0 and a positive --opd-loss-coef."
+        )
 
     if getattr(args, "opd_teacher_prompt_key", None) is not None:
         if args.opd_type != "sglang":

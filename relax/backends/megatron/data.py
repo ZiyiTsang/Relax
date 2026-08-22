@@ -601,8 +601,9 @@ def _apply_opd_sample_mask(batch: dict) -> None:
     """Fold the OPD sample mask into the per-sample response loss masks.
 
     Inactive samples get an all-zero loss mask, so the standard loss reduction
-    (num_tokens / sum_of_sample_mean / CP slicing / metric counts) excludes them
-    from both the numerator and the denominator without any extra plumbing.
+    (num_tokens / sum_of_sample_mean / CP slicing / metric counts) excludes
+    them from both the numerator and the denominator without any extra
+    plumbing.
     """
     sample_mask = batch.get(OPD_SAMPLE_MASK)
     loss_masks = batch.get("loss_masks")

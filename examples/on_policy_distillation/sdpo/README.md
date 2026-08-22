@@ -82,21 +82,21 @@ prompt-data
 
 当前脚本使用以下关键配置：
 
-| 配置                      | 当前值         | 说明                                                                           |
-| ------------------------- | -------------- | ------------------------------------------------------------------------------ |
-| `--use-opd`               | 开启           | 启用 on-policy distillation                                                    |
-| `--opd-type`              | `sglang`       | teacher 由 Relax 管理的 SGLang 服务提供 log-probability                        |
-| `--opd-token-selection`   | `student_topk` | 在学生 rollout 的 top-K token 集合上计算 SDPO 信号                             |
-| `--opd-log-prob-top-k`    | `100`          | 每个位置收集 100 个 token 的 log-probability                                   |
-| `--opd-kl-type`           | `jsd`          | 使用 JSD 形式的 token-level distillation criterion                             |
-| `--opd-norm-mode`         | `tail`         | 保留 top-K 之外的 tail probability mass                                        |
-| `--opd-loss-coef`         | `1.0`          | 将 distillation signal 作为 loss 注入训练                                      |
-| `--opd-kl-coef`           | `0.0`          | 不使用 advantage 形式的 OPD KL                                                 |
-| `--opd-disable-rl-reward` | 开启           | 不把基础 RL outcome reward 注入 actor 优化；custom reward 仍用于 SDPO feedback |
-| `--group-rm`              | 开启           | 让同一个 prompt 的多个 rollout 进入同一 reward group                           |
-| `--use-rollout-logprobs`  | 开启           | 复用学生 rollout 阶段的 log-probability 数据                                   |
-| `--colocate --offload`    | 开启           | 在 rollout、teacher 和 actor 之间切换共享 GPU 资源                             |
-| `--sdpo-teacher-update-mode` | `ema`       | 每个训练步后用 EMA（`--sdpo-teacher-ema-alpha 0.01`）更新 teacher 权重          |
+| 配置                         | 当前值         | 说明                                                                           |
+| ---------------------------- | -------------- | ------------------------------------------------------------------------------ |
+| `--use-opd`                  | 开启           | 启用 on-policy distillation                                                    |
+| `--opd-type`                 | `sglang`       | teacher 由 Relax 管理的 SGLang 服务提供 log-probability                        |
+| `--opd-token-selection`      | `student_topk` | 在学生 rollout 的 top-K token 集合上计算 SDPO 信号                             |
+| `--opd-log-prob-top-k`       | `100`          | 每个位置收集 100 个 token 的 log-probability                                   |
+| `--opd-kl-type`              | `jsd`          | 使用 JSD 形式的 token-level distillation criterion                             |
+| `--opd-norm-mode`            | `tail`         | 保留 top-K 之外的 tail probability mass                                        |
+| `--opd-loss-coef`            | `1.0`          | 将 distillation signal 作为 loss 注入训练                                      |
+| `--opd-kl-coef`              | `0.0`          | 不使用 advantage 形式的 OPD KL                                                 |
+| `--opd-disable-rl-reward`    | 开启           | 不把基础 RL outcome reward 注入 actor 优化；custom reward 仍用于 SDPO feedback |
+| `--group-rm`                 | 开启           | 让同一个 prompt 的多个 rollout 进入同一 reward group                           |
+| `--use-rollout-logprobs`     | 开启           | 复用学生 rollout 阶段的 log-probability 数据                                   |
+| `--colocate --offload`       | 开启           | 在 rollout、teacher 和 actor 之间切换共享 GPU 资源                             |
+| `--sdpo-teacher-update-mode` | `ema`          | 每个训练步后用 EMA（`--sdpo-teacher-ema-alpha 0.01`）更新 teacher 权重         |
 
 `student_topk` 模式需要 SGLang 支持按位置返回 token ID。launcher 会设置
 `RELAX_OPD_PER_POS_TOKEN_IDS=1`；运行环境还必须安装对应的 SGLang source patch。详见
