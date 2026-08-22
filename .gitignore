@@ -54,6 +54,3 @@ tensorboard_log
 # .github
 .github/copilot-instructions.md
 env.sh
-configs/env.yaml
-wandb/
-scripts/training/sdpo/
