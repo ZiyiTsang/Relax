@@ -17,8 +17,10 @@ import numpy as np
 import pytest
 
 from relax.engine.rollout.on_policy_distillation import OpdManager
+from relax.utils.opd.feedback import OPDFeedback
 from relax.utils.opd.opd_main_worker import LogprobResponse, TopkWorker
 from relax.utils.opd.opd_opsd_worker import OpsdWorker
+from relax.utils.opd.sdpo.feedback import SDPOFeedback, _clear_teacher_payload
 from relax.utils.types import Sample
 
 
@@ -122,7 +124,7 @@ def test_rollout_topk_payload_parsing_keeps_ordinary_opd_contract() -> None:
 def test_sdpo_teacher_prefill_uses_privileged_prompt_offset(monkeypatch) -> None:
     manager = object.__new__(OpdManager)
     manager.args = type("Args", (), {"opd_teacher_url": "http://teacher"})()
-    manager.is_sdpo = True
+    manager.feedback = SDPOFeedback()
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
     manager.opsd_worker = OpsdWorker(is_opsd=True)
@@ -161,7 +163,7 @@ def test_sdpo_teacher_prefill_uses_privileged_prompt_offset(monkeypatch) -> None
 def test_ordinary_teacher_prefill_keeps_rollout_input_and_original_offset(monkeypatch) -> None:
     manager = object.__new__(OpdManager)
     manager.args = type("Args", (), {"opd_teacher_url": "http://teacher"})()
-    manager.is_sdpo = False
+    manager.feedback = OPDFeedback()
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
     manager.opsd_worker = OpsdWorker(is_opsd=True)
@@ -208,7 +210,7 @@ def test_sdpo_rejects_invalid_student_topk_before_teacher_request(
 ) -> None:
     manager = object.__new__(OpdManager)
     manager.args = type("Args", (), {"opd_teacher_url": "http://teacher"})()
-    manager.is_sdpo = True
+    manager.feedback = SDPOFeedback()
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
     manager.opsd_worker = OpsdWorker(is_opsd=True)
@@ -229,32 +231,7 @@ def test_sdpo_rejects_invalid_student_topk_before_teacher_request(
         asyncio.run(manager._teacher_prefill(sample, object()))
 
 
-def test_sdpo_requires_student_topk() -> None:
-    manager = object.__new__(OpdManager)
-    manager.is_sdpo = True
-    manager.topk_worker = TopkWorker("teacher_topk", top_k=2, opd_loss_coef=1.0)
-
-    with pytest.raises(ValueError, match="SDPO only supports student_topk"):
-        manager._validate_sdpo_configuration()
-
-
-def test_sdpo_enables_dynamic_teacher_prompt_without_teacher_key() -> None:
-    manager = object.__new__(OpdManager)
-    manager.is_sdpo = True
-    manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
-
-    assert manager._validate_sdpo_configuration() is None
-
-
-def test_sdpo_accepts_student_topk() -> None:
-    manager = object.__new__(OpdManager)
-    manager.is_sdpo = True
-    manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
-
-    assert manager._validate_sdpo_configuration() is None
-
-
-def test_sdpo_manager_constructs_opsd_worker() -> None:
+def test_sdpo_manager_constructs_opsd_worker_and_feedback() -> None:
     args = type(
         "Args",
         (),
@@ -263,8 +240,9 @@ def test_sdpo_manager_constructs_opsd_worker() -> None:
             "opd_log_prob_top_k": 2,
             "opd_kl_coef": 0.0,
             "opd_loss_coef": 1.0,
-            "group_rm": True,
-            "opd_teacher_prompt_key": "sdpo_prompt",
+            "opd_feedback_class": "relax.utils.opd.sdpo.feedback.SciKnowEvalSDPOFeedback",
+            "opd_teacher_prompt_key": None,
+            "opd_teacher_image_key": None,
         },
     )()
 
@@ -272,24 +250,12 @@ def test_sdpo_manager_constructs_opsd_worker() -> None:
 
     assert manager.opsd_worker is not None
     assert manager.opsd_worker.is_opsd
-    assert manager._validate_sdpo_configuration() is None
-
-
-@pytest.mark.parametrize("teacher_prompt", [None, "", []])
-def test_sdpo_empty_teacher_context_fails_before_teacher_request(teacher_prompt) -> None:
-    manager = object.__new__(OpdManager)
-    manager.is_sdpo = True
-
-    empty_context = Sample(response_length=0, teacher_prompt=teacher_prompt)
-    usable_context = Sample(response_length=3, teacher_prompt=[{"role": "user", "content": "context"}])
-
-    assert manager._needs_teacher_request(empty_context) is False
-    assert manager._needs_teacher_request(usable_context) is True
+    assert isinstance(manager.feedback, SDPOFeedback)
 
 
 def test_sdpo_transfer_schema_contains_sample_mask_and_topk_payload() -> None:
     manager = object.__new__(OpdManager)
-    manager.is_sdpo = True
+    manager.feedback = SDPOFeedback()
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
 
@@ -302,7 +268,7 @@ def test_sdpo_transfer_schema_contains_sample_mask_and_topk_payload() -> None:
 
 def test_sdpo_transfer_preserves_sample_mask_order() -> None:
     manager = object.__new__(OpdManager)
-    manager.is_sdpo = True
+    manager.feedback = SDPOFeedback()
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     manager.sampled_worker = None
     samples = [Sample(index=0, opd_sample_mask=True), Sample(index=1, opd_sample_mask=False)]
@@ -348,11 +314,7 @@ def test_teacher_transfer_schema_matrix(mode, selection, kl_coef, loss_coef, exp
         use_opd=True,
         opd_type="sglang",
         group_rm=mode == "sdpo",
-        opd_feedback_class=(
-            "relax.utils.opd.feedback.SciKnowEvalSDPOFeedback"
-            if mode == "sdpo"
-            else "relax.utils.opd.feedback.OPDFeedback"
-        ),
+        opd_feedback_class="relax.utils.opd.sdpo.feedback.SciKnowEvalSDPOFeedback" if mode == "sdpo" else None,
         opd_token_selection=selection,
         opd_log_prob_top_k=2,
         opd_kl_coef=kl_coef,
@@ -368,7 +330,7 @@ def test_teacher_transfer_schema_matrix(mode, selection, kl_coef, loss_coef, exp
 
 def test_sdpo_assembly_rejects_missing_teacher_topk_payload() -> None:
     manager = object.__new__(OpdManager)
-    manager.is_sdpo = True
+    manager.feedback = SDPOFeedback()
     manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
     sample = Sample(
         index=4,
@@ -396,7 +358,7 @@ def test_teacher_payload_reset_preserves_student_rollout_topk() -> None:
         teacher_prompt_length=1,
     )
 
-    OpdManager._clear_teacher_payload(sample)
+    _clear_teacher_payload(sample)
 
     assert sample.teacher_log_probs is None
     assert sample.teacher_topk_token_ids is None
@@ -411,22 +373,6 @@ def test_teacher_payload_reset_preserves_student_rollout_topk() -> None:
     np.testing.assert_array_equal(sample.student_topk_log_probs, np.array([[-0.1, -0.2]], dtype=np.float32))
 
 
-def test_sdpo_prefill_rejects_multimodal_before_teacher_request() -> None:
-    manager = object.__new__(OpdManager)
-    manager.is_sdpo = True
-    manager.topk_worker = TopkWorker("student_topk", top_k=2, opd_loss_coef=1.0)
-    manager.opsd_worker = OpsdWorker(is_opsd=True)
-    sample = Sample(
-        prompt="question",
-        tokens=[10, 20],
-        response_length=1,
-        multimodal_inputs={"images": [b"image"]},
-    )
-
-    with pytest.raises(ValueError, match="SDPO only supports text inputs"):
-        asyncio.run(manager.prefill(sample))
-
-
 def test_ordinary_prefill_does_not_clear_existing_teacher_payload(monkeypatch) -> None:
     manager = object.__new__(OpdManager)
     manager.args = type(
@@ -434,7 +380,7 @@ def test_ordinary_prefill_does_not_clear_existing_teacher_payload(monkeypatch) -
         (),
         {"opd_teacher_connector_limit": 1, "opd_teacher_timeout_s": 1.0},
     )()
-    manager.is_sdpo = False
+    manager.feedback = OPDFeedback()
     manager.topk_worker = None
     manager.sampled_worker = None
     manager.opsd_worker = OpsdWorker(is_opsd=True)
@@ -459,7 +405,7 @@ def test_ordinary_prefill_keeps_zero_response_teacher_dispatch(monkeypatch) -> N
         (),
         {"opd_teacher_connector_limit": 1, "opd_teacher_timeout_s": 1.0},
     )()
-    manager.is_sdpo = False
+    manager.feedback = OPDFeedback()
     manager.topk_worker = None
     manager.sampled_worker = None
     manager.opsd_worker = OpsdWorker(is_opsd=True)

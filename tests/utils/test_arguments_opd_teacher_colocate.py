@@ -192,6 +192,26 @@ def test_topk_opd_rejects_allgather_context_parallel(arguments_module):
         arguments_module.slime_validate_args(args)
 
 
+def test_topk_opd_rejects_context_parallelism(arguments_module):
+    args = _opd_args()
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.context_parallel_size = 2
+
+    with pytest.raises(ValueError, match="not compatible with context parallelism"):
+        arguments_module.slime_validate_args(args)
+
+
+def test_topk_opd_rejects_dynamic_context_parallel(arguments_module):
+    args = _opd_args()
+    args.opd_token_selection = "student_topk"
+    args.opd_log_prob_top_k = 2
+    args.dynamic_context_parallel = True
+
+    with pytest.raises(ValueError, match="not compatible with context parallelism"):
+        arguments_module.slime_validate_args(args)
+
+
 def test_managed_opd_teacher_colocate_preserves_rollout_resource_split(arguments_module):
     args = _opd_args()
     args.colocate = True

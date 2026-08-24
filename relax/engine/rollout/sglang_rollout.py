@@ -84,11 +84,7 @@ class GenerateState(metaclass=SingletonMeta):
 
         # OPD manager (singleton — one OpdManager per GenerateState)
         self.opd_manager = opd.OpdManager(args) if opd.is_opd_enabled(args) else None
-        self.feedback = None
-        if self.opd_manager is not None:
-            from relax.utils.opd.feedback import load_feedback_class
-
-            self.feedback = load_feedback_class(getattr(args, "opd_feedback_class", None))()
+        self.feedback = self.opd_manager.feedback if self.opd_manager is not None else None
 
         # Media-encoding thread pool for this rollout worker process, sized by
         # --encode-max-workers (falls back to $RELAX_ENCODE_MAX_WORKERS, then an
@@ -685,8 +681,6 @@ async def generate_and_rm_group(
                 state.feedback.record_sample_feedback(sample, reward)
 
         if state.opd_manager and not evaluation:
-            if state.feedback is None:
-                raise RuntimeError("OPD feedback implementation was not initialized")
             state.feedback.prepare_teacher_prompts(group, rewards)
             await state.opd_manager.prefill(group, _encode_multimodal_inputs)
 

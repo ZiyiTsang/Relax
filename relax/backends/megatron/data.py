@@ -292,7 +292,8 @@ def get_batch(
     else:
         batch, _ = next(data_iterator)
 
-    _apply_opd_sample_mask(batch)
+    if getattr(get_args(), "use_opd", False):
+        _apply_opd_sample_mask(batch)
 
     use_dynamic_context_parallel = getattr(get_args(), "dynamic_context_parallel", False)
     if use_dynamic_context_parallel:
@@ -583,15 +584,6 @@ def get_batch(
                         vals, batch["total_lengths"], batch["response_lengths"], ptls, strict=False
                     )
                 ]
-        if getattr(get_args(), "use_opd", False):
-            from relax.utils.opd.opd_utils import slice_opd_topk_rollout_fields
-
-            slice_opd_topk_rollout_fields(
-                batch,
-                get_args(),
-                dynamic_cp_size=cp_size,
-                dynamic_cp_rank=cp_rank,
-            )
 
     batch = move_tensors_to_device(batch, batch["tokens"].device)
     return batch

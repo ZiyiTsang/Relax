@@ -52,7 +52,7 @@ EVAL_ARGS=(
 
 OPD_ARGS=(
     --use-opd
-    --opd-feedback-class "relax.utils.opd.feedback.ToolUseSDPOFeedback"
+    --opd-feedback-class "relax.utils.opd.sdpo.feedback.ToolUseSDPOFeedback"
     --opd-type sglang
     --teacher-hf-checkpoint "${teacher_model}"
     --teacher-num-gpus-per-engine 1

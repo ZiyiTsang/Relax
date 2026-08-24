@@ -88,7 +88,7 @@ TEACHER_ROUTES="{\"dapo-math-17k\":\"${MODEL_DIR}/${TEXT_TEACHER_MODEL_NAME}/\",
 
 OPD_ARGS=(
    --use-opd
-   --opd-feedback-class relax.utils.opd.feedback.OPSDFeedback
+   --opd-feedback-class relax.utils.opd.opsd.feedback.OPSDFeedback
    --opd-type sglang
    --opd-only-reward
    --opd-kl-coef 1.0

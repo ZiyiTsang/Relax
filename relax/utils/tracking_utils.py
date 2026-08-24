@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 import wandb
+
 from relax.utils.metrics.adapters.apprise import _AppriseAdapter
 from relax.utils.metrics.adapters.clearml import _ClearMLAdapter
 from relax.utils.metrics.adapters.tensorboard import _TensorboardAdapter

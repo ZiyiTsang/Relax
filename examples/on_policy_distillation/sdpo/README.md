@@ -17,7 +17,7 @@ SGLang teacher → `student_topk + JSD` 蒸馏训练，你只需要准备数据�
 - 六个开箱即用的两卡 colocate 训练脚本（SciKnowEval × 4、ToolUse、ToolAlpaca）
 - 数据转换工具 `prepare_data.py`：把参考数据转成 Relax 的 `prompt`/`label`/`metadata`
   JSONL schema
-- 规则 reward 与 SDPO feedback 实现（`reward.py` 与 `relax.utils.opd.feedback`）
+- 规则 reward 与 SDPO feedback 实现（`reward.py` 与 `relax.utils.opd.sdpo.feedback`）
 - 由 Relax 自动管理的 SGLang teacher，无需手动部署
 
 ## 前置条件
