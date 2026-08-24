@@ -3,35 +3,39 @@
 """Feedback strategies that own every OPD-flavored algorithm difference.
 
 ``EnvironmentFeedback`` is the polymorphism point of the OPD algorithm family
-(OPD / MOPD / OPSD / SDPO). The base-class defaults reproduce plain OPD, so
-the shared rollout path never branches on an algorithm name: a subclass only
-overrides the hooks where its behavior differs. Hooks raise to hard-fail and
-return to degrade.
+(OPD / MOPD / OPSD / SDPO). Every rollout runs the same shared two-step path
+-- record what the environment said, then decide what privileged prompt the
+teacher sees -- bound dynamically to a subclass. The base-class defaults
+reproduce plain OPD (empty privilege), so a subclass only overrides the hooks
+where its behavior differs. Hooks raise to hard-fail and return to degrade.
 """
 
 from __future__ import annotations
 
 import importlib
-from abc import ABC, abstractmethod
 from typing import Any
 
 from relax.utils.opd.opd_opsd_worker import OpsdWorker
 from relax.utils.types import Sample
 
 
-class EnvironmentFeedback(ABC):
+class EnvironmentFeedback:
     @staticmethod
     def record(sample: Sample, text: str | None) -> None:
         if text:
             sample.metadata.setdefault("env_feedback", []).append(str(text))
 
-    @abstractmethod
     def record_sample_feedback(self, sample: Sample, reward: Any) -> None:
-        raise NotImplementedError
+        feedback = self._reward_feedback(reward)
+        if feedback:
+            self.record(sample, feedback)
 
-    @abstractmethod
     def prepare_teacher_prompts(self, group: list[Sample], rewards: list[Any]) -> None:
-        raise NotImplementedError
+        """Assign the privileged teacher prompt for every sample in the
+        group."""
+        for sample in group:
+            sample.teacher_prompt = None
+            sample.opd_sample_mask = None
 
     @staticmethod
     def create_opsd_worker(args: Any) -> OpsdWorker:
@@ -74,13 +78,7 @@ class EnvironmentFeedback(ABC):
 
 
 class OPDFeedback(EnvironmentFeedback):
-    def record_sample_feedback(self, sample: Sample, reward: Any) -> None:
-        return
-
-    def prepare_teacher_prompts(self, group: list[Sample], rewards: list[Any]) -> None:
-        for sample in group:
-            sample.teacher_prompt = None
-            sample.opd_sample_mask = None
+    """Plain OPD/MOPD: the teacher sees exactly what the student saw."""
 
 
 def load_feedback_class(path: str | None) -> type[EnvironmentFeedback]:

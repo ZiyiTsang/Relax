@@ -30,8 +30,8 @@ def _has_sdpo_teacher_prompt(prompt: object) -> bool:
 
 
 def _clear_teacher_payload(sample: Sample) -> None:
-    """Drop outputs from an earlier teacher request without touching
-    rollout Top-K."""
+    """Drop outputs from an earlier teacher request without touching rollout
+    Top-K."""
 
     for field_name in (
         "teacher_log_probs",
@@ -47,12 +47,6 @@ def _clear_teacher_payload(sample: Sample) -> None:
         "teacher_prompt_length",
     ):
         setattr(sample, field_name, None)
-
-
-def _record_sdpo_sample_feedback(sample: Sample, reward: Any) -> None:
-    feedback = EnvironmentFeedback._reward_feedback(reward)
-    if feedback:
-        EnvironmentFeedback.record(sample, feedback)
 
 
 def _render_sdpo_teacher_prompt(sample: Sample, additions: list[str]) -> str | list[dict[str, str]]:
@@ -131,9 +125,6 @@ def _prepare_sdpo_teacher_prompts(group: list[Sample], rewards: list[Any]) -> No
 
 
 class SDPOFeedback(EnvironmentFeedback):
-    def record_sample_feedback(self, sample: Sample, reward: Any) -> None:
-        _record_sdpo_sample_feedback(sample, reward)
-
     def prepare_teacher_prompts(self, group: list[Sample], rewards: list[Any]) -> None:
         for sample in group:
             validate_sdpo_text_only(sample)

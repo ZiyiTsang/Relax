@@ -48,21 +48,21 @@ def test_record_appends_text_only_to_originating_sample() -> None:
     assert "env_feedback" not in other.metadata
 
 
-def test_record_sample_feedback_uses_feedback_specific_sample_stage() -> None:
+def test_record_sample_feedback_defaults_to_env_feedback_recording() -> None:
     from relax.utils.opd.feedback import OPDFeedback
     from relax.utils.opd.opsd.feedback import OPSDFeedback
     from relax.utils.opd.sdpo.feedback import ToolUseSDPOFeedback
 
-    opd_sample = _sample(1, 0, "answer", {"score": 0.0, "feedback": "unused"})
-    opsd_sample = _sample(1, 1, "answer", {"score": 0.0, "feedback": "unused"})
+    opd_sample = _sample(1, 0, "answer", {"score": 0.0, "feedback": "opd said no"})
+    opsd_sample = _sample(1, 1, "answer", {"score": 0.0, "feedback": "opsd said no"})
     sdpo_sample = _sample(1, 2, "answer", {"score": 0.0, "feedback": "fix the second step"})
 
     OPDFeedback().record_sample_feedback(opd_sample, opd_sample.reward)
     OPSDFeedback().record_sample_feedback(opsd_sample, opsd_sample.reward)
     ToolUseSDPOFeedback().record_sample_feedback(sdpo_sample, sdpo_sample.reward)
 
-    assert "env_feedback" not in opd_sample.metadata
-    assert "env_feedback" not in opsd_sample.metadata
+    assert opd_sample.metadata["env_feedback"] == ["opd said no"]
+    assert opsd_sample.metadata["env_feedback"] == ["opsd said no"]
     assert sdpo_sample.metadata["env_feedback"] == ["fix the second step"]
 
 
@@ -194,20 +194,24 @@ def test_tool_use_uid_when_group_index_is_missing(feedback_class_name: str) -> N
     assert failed.opd_sample_mask is True
 
 
-def test_ordinary_opd_feedback_does_not_create_a_sample_mask() -> None:
+def test_opsd_assigns_dataset_privilege_while_opd_stays_empty() -> None:
     from relax.utils.opd.feedback import OPDFeedback
     from relax.utils.opd.opsd.feedback import OPSDFeedback
 
     opd_sample = _sample(6, 0, "answer", 1.0)
-    opsd_sample = _sample(6, 1, "answer", 1.0)
-    opsd_sample.teacher_prompt = "dataset teacher prompt"
+    privileged = _sample(6, 1, "answer", 1.0)
+    privileged.metadata["opd_teacher_prompt"] = "dataset teacher prompt"
+    unprivileged = _sample(6, 2, "answer", 1.0)
 
     OPDFeedback().prepare_teacher_prompts([opd_sample], [opd_sample.reward])
-    OPSDFeedback().prepare_teacher_prompts([opsd_sample], [opsd_sample.reward])
+    OPSDFeedback().prepare_teacher_prompts([privileged, unprivileged], [privileged.reward, unprivileged.reward])
 
+    assert opd_sample.teacher_prompt is None
     assert opd_sample.opd_sample_mask is None
-    assert opsd_sample.opd_sample_mask is None
-    assert opsd_sample.teacher_prompt == "dataset teacher prompt"
+    assert privileged.teacher_prompt == "dataset teacher prompt"
+    assert privileged.opd_sample_mask is None
+    assert unprivileged.teacher_prompt is None
+    assert unprivileged.opd_sample_mask is None
 
 
 @pytest.mark.parametrize("feedback_class_name", ["ToolUseSDPOFeedback"])
