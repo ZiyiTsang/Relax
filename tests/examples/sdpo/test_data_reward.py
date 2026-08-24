@@ -153,6 +153,58 @@ def test_toolalpaca_reward_wrong_action_has_no_feedback() -> None:
     assert "search" not in result["feedback"]
 
 
+_MULTI_STEP_GOLDEN = [
+    {"Action": "getClientRequestData", "Action_Input": '{"url": "https://httpbin.org/get"}'},
+    {"Action": "sendHttpRequest", "Action_Input": '{"method": "POST", "url": "https://httpbin.org/post"}'},
+]
+
+
+def _multi_step_response() -> str:
+    return (
+        "Action: getClientRequestData\n"
+        'Action Input: {"url": "https://httpbin.org/get"}\n'
+        "Action: sendHttpRequest\n"
+        'Action Input: {"method": "POST", "url": "https://httpbin.org/post"}'
+    )
+
+
+def test_tooluse_reward_accepts_correct_multi_step_trajectory() -> None:
+    sample = _sample({"data_source": "tooluse", "golden_answer": _MULTI_STEP_GOLDEN}, _multi_step_response())
+
+    result = score(None, sample)
+
+    assert result["score"] == 1.0
+    assert result["format_error"] == 0
+
+
+def test_tooluse_reward_rejects_swapped_step_order() -> None:
+    swapped = (
+        "Action: sendHttpRequest\n"
+        'Action Input: {"method": "POST", "url": "https://httpbin.org/post"}\n'
+        "Action: getClientRequestData\n"
+        'Action Input: {"url": "https://httpbin.org/get"}'
+    )
+    sample = _sample({"data_source": "tooluse", "golden_answer": _MULTI_STEP_GOLDEN}, swapped)
+
+    result = score(None, sample)
+
+    assert result["score"] == 0.0
+
+
+def test_tooluse_reward_rejects_cross_step_value_swap() -> None:
+    swapped_values = (
+        "Action: getClientRequestData\n"
+        'Action Input: {"method": "POST", "url": "https://httpbin.org/post"}\n'
+        "Action: sendHttpRequest\n"
+        'Action Input: {"url": "https://httpbin.org/get"}'
+    )
+    sample = _sample({"data_source": "tooluse", "golden_answer": _MULTI_STEP_GOLDEN}, swapped_values)
+
+    result = score(None, sample)
+
+    assert result["score"] == 0.0
+
+
 def _sciknoweval_sample(response: str, *, expected: str = "B", task_type: str = "mcq") -> SimpleNamespace:
     return _sample(
         {
