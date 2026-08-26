@@ -176,7 +176,6 @@ SGLANG_ARGS=(
    --sglang-mem-fraction-static 0.6
    --sglang-max-running-requests 128
    --sglang-load-format dummy
-   --sglang-enable-weights-cpu-backup
 )
 
 PARTIAL_ROLLOUT_ARGS=(

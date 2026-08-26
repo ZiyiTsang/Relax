@@ -463,6 +463,18 @@ def validate_managed_opd_teacher_colocate_args(args: Any) -> None:
         )
 
 
+def maybe_enable_sglang_weights_cpu_backup(args: Any) -> None:
+    # Rollout sleep/wake without a CPU backup leaves weight pages uninitialized.
+    if not getattr(args, "use_opd", False):
+        return
+    if not getattr(args, "offload_rollout", False):
+        return
+    if getattr(args, "sglang_enable_weights_cpu_backup", False):
+        return
+    logger.info("OPD with offloaded rollout: auto-enabling --sglang-enable-weights-cpu-backup.")
+    args.sglang_enable_weights_cpu_backup = True
+
+
 def add_opd_arguments(parser: Any) -> Any:
     parser.add_argument(
         "--use-opd",
