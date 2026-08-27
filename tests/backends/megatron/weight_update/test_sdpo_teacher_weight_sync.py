@@ -244,7 +244,7 @@ def test_sdpo_actor_snapshot_refreshes_before_ema_update():
     actor._sdpo_teacher_ema_enabled = True
     actor.args = type("Args", (), {"sdpo_teacher_ema_alpha": 0.01})()
 
-    actor._backup_actor_and_update_sdpo_teacher_ema()
+    actor._snapshot_student_and_step_ema_teacher()
 
     assert events == [
         ("backup", "actor"),
@@ -279,7 +279,7 @@ def test_actor_snapshot_refresh_keeps_ordinary_opd_without_ema():
     actor.weights_backuper = _Backuper()
     actor._sdpo_teacher_ema_enabled = False
 
-    actor._backup_actor_and_update_sdpo_teacher_ema()
+    actor._snapshot_student_and_step_ema_teacher()
 
     assert events == [("backup", "actor")]
 
