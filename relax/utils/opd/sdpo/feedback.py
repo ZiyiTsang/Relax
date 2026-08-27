@@ -125,6 +125,8 @@ def _prepare_sdpo_teacher_prompts(group: list[Sample], rewards: list[Any]) -> No
 
 
 class SDPOFeedback(EnvironmentFeedback):
+    is_sdpo_feedback = True
+
     def prepare_teacher_prompts(self, group: list[Sample], rewards: list[Any]) -> None:
         for sample in group:
             validate_sdpo_text_only(sample)
