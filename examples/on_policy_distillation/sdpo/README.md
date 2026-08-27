@@ -14,7 +14,7 @@ SGLang teacher → `student_topk + JSD` 蒸馏训练，你只需要准备数据�
 
 ## 这个示例包含什么
 
-- 六个开箱即用的两卡 colocate 训练脚本（SciKnowEval × 4、ToolUse、ToolAlpaca）
+- 六个开箱即用的四卡 colocate 训练脚本（SciKnowEval × 4、ToolUse、ToolAlpaca）
 - 数据转换工具 `prepare_data.py`：把参考数据转成 Relax 的 `prompt`/`label`/`metadata`
   JSONL schema
 - 规则 reward 与 SDPO feedback 实现（`reward.py` 与 `relax.utils.opd.sdpo.feedback`）
@@ -24,9 +24,9 @@ SGLang teacher → `student_topk + JSD` 蒸馏训练，你只需要准备数据�
 
 开始之前请确认以下内容都已就绪：
 
-- 一台可用 **2×GPU** 的机器 / pod，且当前没有其他 Ray 任务在运行
+- 一台可用 **4×GPU** 的机器 / pod，且当前没有其他 Ray 任务在运行
 - Relax worktree，以及配套的 Relax-SDPO Python 环境（见下方 `env.sh` 的 `RELAX_VENV`）
-- Qwen3-4B-Instruct-2507 checkpoint（student 与 teacher 默认共用同一个）
+- Qwen3-8B checkpoint（student 与 teacher 默认共用同一个）
 - SDPO 参考数据（SciKnowEval / ToolUse / ToolAlpaca，或你自己的文本数据）
 - SGLang 已应用 per-position token-id patch（launcher 会设置
   `RELAX_OPD_PER_POS_TOKEN_IDS=1`），详见
@@ -38,7 +38,7 @@ SGLang teacher → `student_topk + JSD` 蒸馏训练，你只需要准备数据�
 # 1. 进入项目根目录，确认环境可用（无残留 Ray 任务）
 cd <relax-worktree>
 ray status          # 或检查当前 pod 的 tmux，确保没有其他任务
-nvidia-smi          # 确认两张 GPU 空闲
+nvidia-smi          # 确认四张 GPU 空闲
 
 # 2. 准备数据：以 SciKnowEval Chemistry 为例
 python3 -m examples.on_policy_distillation.sdpo.prepare_data \
@@ -52,13 +52,13 @@ python3 -m examples.on_policy_distillation.sdpo.prepare_data \
 #    更新 RELAX_VENV / MEGATRON / STUDENT_MODEL_PATH / TEACHER_MODEL_PATH / SDPO_DATA_ROOT
 
 # 4. 启动训练
-bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-2xgpu-colocate.sh
+bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-4xgpu-colocate.sh
 
 # 5. 观察日志与指标（TensorBoard 曲线、训练 loss / reward / teacher 状态等）
 ```
 
-首次验证建议先跑小规模 smoke：`prepare_data.py` 加 `--max-rows 2` 只转两条数据，或先使用
-Chemistry / ToolUse 等默认小 rollout 的 launcher，跑通后再上 Biology 的大配置。
+首次验证建议先跑小规模 smoke：`prepare_data.py` 加 `--max-rows 2` 只转两条数据，并临时调小
+launcher 的 `--num-rollout` / `--rollout-batch-size` 后启动。
 
 ## 训练流程
 
@@ -82,21 +82,21 @@ prompt-data
 
 当前脚本使用以下关键配置：
 
-| 配置                         | 当前值         | 说明                                                                           |
-| ---------------------------- | -------------- | ------------------------------------------------------------------------------ |
-| `--use-opd`                  | 开启           | 启用 on-policy distillation                                                    |
-| `--opd-type`                 | `sglang`       | teacher 由 Relax 管理的 SGLang 服务提供 log-probability                        |
-| `--opd-token-selection`      | `student_topk` | 在学生 rollout 的 top-K token 集合上计算 SDPO 信号                             |
-| `--opd-log-prob-top-k`       | `100`          | 每个位置收集 100 个 token 的 log-probability                                   |
-| `--opd-kl-type`              | `jsd`          | 使用 JSD 形式的 token-level distillation criterion                             |
-| `--opd-norm-mode`            | `tail`         | 保留 top-K 之外的 tail probability mass                                        |
-| `--opd-loss-coef`            | `1.0`          | 将 distillation signal 作为 loss 注入训练                                      |
-| `--opd-kl-coef`              | `0.0`          | 不使用 advantage 形式的 OPD KL                                                 |
-| `--opd-disable-rl-reward`    | 开启           | 不把基础 RL outcome reward 注入 actor 优化；custom reward 仍用于 SDPO feedback |
-| `--group-rm`                 | 开启           | 让同一个 prompt 的多个 rollout 进入同一 reward group                           |
-| `--use-rollout-logprobs`     | 开启           | 复用学生 rollout 阶段的 log-probability 数据                                   |
-| `--colocate --offload`       | 开启           | 在 rollout、teacher 和 actor 之间切换共享 GPU 资源                             |
-| `--sdpo-teacher-update-mode` | `ema`          | 每个训练步后用 EMA（`--sdpo-teacher-ema-alpha 0.01`）更新 teacher 权重         |
+| 配置                                         | 当前值         | 说明                                                                           |
+| -------------------------------------------- | -------------- | ------------------------------------------------------------------------------ |
+| `--use-opd`                                  | 开启           | 启用 on-policy distillation                                                    |
+| `--opd-type`                                 | `sglang`       | teacher 由 Relax 管理的 SGLang 服务提供 log-probability                        |
+| `--opd-token-selection`                      | `student_topk` | 在学生 rollout 的 top-K token 集合上计算 SDPO 信号                             |
+| `--opd-log-prob-top-k`                       | `16`           | 每个位置收集 16 个 token 的 log-probability                                    |
+| `--opd-kl-type`                              | `jsd`          | 使用 JSD 形式的 token-level distillation criterion                             |
+| `--opd-norm-mode`                            | `tail`         | 保留 top-K 之外的 tail probability mass                                        |
+| `--opd-loss-coef`                            | `1.0`          | 将 distillation signal 作为 loss 注入训练                                      |
+| `--opd-kl-coef`                              | `0.0`          | 不使用 advantage 形式的 OPD KL                                                 |
+| `--opd-disable-rl-reward`                    | 开启           | 不把基础 RL outcome reward 注入 actor 优化；custom reward 仍用于 SDPO feedback |
+| `--group-rm`                                 | 开启           | 让同一个 prompt 的多个 rollout 进入同一 reward group                           |
+| `--use-rollout-logprobs`                     | 开启           | 复用学生 rollout 阶段的 log-probability 数据                                   |
+| `--colocate`                                 | 开启           | 在 rollout、teacher 和 actor 之间切换共享 GPU 资源                             |
+| `--teacher-sglang-enable-weights-cpu-backup` | 开启           | colocate sleep/wake 时把 teacher 权重备份到 CPU，避免唤醒后权重丢失            |
 
 `student_topk` 模式需要 SGLang 支持按位置返回 token ID。launcher 会设置
 `RELAX_OPD_PER_POS_TOKEN_IDS=1`；运行环境还必须安装对应的 SGLang source patch。详见
@@ -104,35 +104,37 @@ prompt-data
 
 ## Launcher 与资源布局
 
-所有当前 launcher 都是单机两卡 colocate 配置：
+所有当前 launcher 都是单机四卡 colocate 配置：
 
 ```text
-两张 GPU 的 colocate resource pool
-├── actor   ：2 GPU，训练阶段使用整个 pool
-├── rollout ：1 GPU，rollout 阶段使用
+四张 GPU 的 colocate resource pool
+├── actor   ：4 GPU（TP=4），训练阶段使用整个 pool
+├── rollout ：3 GPU，rollout 阶段使用
 └── teacher ：1 GPU，rollout 阶段使用 managed SGLang teacher
 ```
 
 脚本中的资源配置为：
 
 ```json
-{"actor": [1, 2], "rollout": [1, 1], "teacher": [1, 1]}
+{"actor": [1, 4], "rollout": [1, 3], "teacher": [1, 1]}
 ```
 
-| 脚本                                                                                         | 数据入口                            | 默认 rollout 配置                                                  | Feedback 类               |
-| -------------------------------------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------ | ------------------------- |
-| [`run-sciknoweval-biology-2xgpu-colocate.sh`](run-sciknoweval-biology-2xgpu-colocate.sh)     | `sciknoweval/biology/train.jsonl`   | `num-rollout=50`，`n-samples-per-prompt=8`，`global-batch-size=32` | `SciKnowEvalSDPOFeedback` |
-| [`run-sciknoweval-chemistry-2xgpu-colocate.sh`](run-sciknoweval-chemistry-2xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` |
-| [`run-sciknoweval-physics-2xgpu-colocate.sh`](run-sciknoweval-physics-2xgpu-colocate.sh)     | `sciknoweval/physics/train.jsonl`   | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` |
-| [`run-sciknoweval-material-2xgpu-colocate.sh`](run-sciknoweval-material-2xgpu-colocate.sh)   | `sciknoweval/material/train.jsonl`  | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `SciKnowEvalSDPOFeedback` |
-| [`run-tooluse-2xgpu-colocate.sh`](run-tooluse-2xgpu-colocate.sh)                             | `tooluse/train.jsonl`               | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `ToolUseSDPOFeedback`     |
-| [`run-toolalpaca-2xgpu-colocate.sh`](run-toolalpaca-2xgpu-colocate.sh)                       | `toolalpaca/train.jsonl`            | `num-rollout=2`，`n-samples-per-prompt=2`，`global-batch-size=2`   | `ToolUseSDPOFeedback`     |
+六个 launcher 的训练参数完全一致：`--num-rollout 5000`、`--rollout-batch-size 32`、
+`--n-samples-per-prompt 8`、`--global-batch-size 256`、`--eval-interval 5`、
+`--n-samples-per-eval-prompt 16`。
 
-其中 Chemistry、Physics、Materials、ToolUse 和 ToolAlpaca launcher 是两卡 smoke 配置；
-Biology launcher 使用更大的默认 rollout 配置。当前脚本没有独立的公共 SDPO launcher，
-每个数据入口都显式指定了自己的 feedback 类。student rollout 统一为
-`--rollout-max-response-len 8192`；teacher 请求超时由各 launcher 的
-`--opd-teacher-timeout-s` 控制（未显式设置时默认 30 s），需要时可自行调整。
+| 脚本                                                                                         | 数据入口                            | eval 入口                          | Feedback 类               |
+| -------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------- | ------------------------- |
+| [`run-sciknoweval-biology-4xgpu-colocate.sh`](run-sciknoweval-biology-4xgpu-colocate.sh)     | `sciknoweval/biology/train.jsonl`   | `sciknoweval/biology/eval.jsonl`   | `SciKnowEvalSDPOFeedback` |
+| [`run-sciknoweval-chemistry-4xgpu-colocate.sh`](run-sciknoweval-chemistry-4xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `sciknoweval/chemistry/eval.jsonl` | `SciKnowEvalSDPOFeedback` |
+| [`run-sciknoweval-physics-4xgpu-colocate.sh`](run-sciknoweval-physics-4xgpu-colocate.sh)     | `sciknoweval/physics/train.jsonl`   | `sciknoweval/physics/eval.jsonl`   | `SciKnowEvalSDPOFeedback` |
+| [`run-sciknoweval-material-4xgpu-colocate.sh`](run-sciknoweval-material-4xgpu-colocate.sh)   | `sciknoweval/material/train.jsonl`  | `sciknoweval/material/eval.jsonl`  | `SciKnowEvalSDPOFeedback` |
+| [`run-tooluse-4xgpu-colocate.sh`](run-tooluse-4xgpu-colocate.sh)                             | `tooluse/train.jsonl`               | `tooluse/eval.jsonl`               | `ToolUseSDPOFeedback`     |
+| [`run-toolalpaca-4xgpu-colocate.sh`](run-toolalpaca-4xgpu-colocate.sh)                       | `toolalpaca/train.jsonl`            | `toolalpaca/eval.jsonl`            | `ToolUseSDPOFeedback`     |
+
+当前脚本没有独立的公共 SDPO launcher，每个数据入口都显式指定了自己的 feedback 类。
+student rollout 统一为 `--rollout-max-response-len 8192`；teacher 请求超时由各 launcher 的
+`--opd-teacher-timeout-s` 控制（launcher 显式设置为 600 s），需要时可自行调整。
 
 ## 文件结构
 
@@ -141,22 +143,22 @@ Biology launcher 使用更大的默认 rollout 配置。当前脚本没有独立
 | [`env.sh`](env.sh)                   | 设置项目根目录、Python/Megatron 环境、模型路径和数据根目录，并停止当前 Ray 进程 |
 | [`prepare_data.py`](prepare_data.py) | 将参考数据转换为 Relax 的 `prompt`/`label`/`metadata` JSONL schema              |
 | [`reward.py`](reward.py)             | 提供 SciKnowEval、ToolUse 和 ToolAlpaca 的 rule-based reward                    |
-| `run-*-2xgpu-colocate.sh`            | 按数据集启动两卡 colocate SDPO 训练                                             |
+| `run-*-4xgpu-colocate.sh`            | 按数据集启动四卡 colocate SDPO 训练                                             |
 
 ## 环境准备
 
 ### 模型
 
-当前脚本通过 `scripts/models/qwen3-4B-Instruct-2507.sh` 加载 Qwen3-4B 的学生模型配置，
-并默认使用同一 Qwen3-4B checkpoint 作为 student 和 teacher：
+当前脚本通过 `scripts/models/qwen3-8B.sh` 加载 Qwen3-8B 的学生模型配置，
+并默认使用同一 Qwen3-8B checkpoint 作为 student 和 teacher：
 
 ```text
-<model-root>/Qwen3-4B-Instruct-2507  # student
-<model-root>/Qwen3-4B-Instruct-2507  # teacher
+<model-root>/Qwen3-8B  # student
+<model-root>/Qwen3-8B  # teacher
 ```
 
 也可以使用不同的文本 teacher checkpoint，但必须确保 checkpoint 能被当前 managed
-SGLang teacher 和 Qwen3-4B 训练配置正确加载。当前 SDPO prompt-routing 路径只支持文本
+SGLang teacher 和 Qwen3-8B 训练配置正确加载。当前 SDPO prompt-routing 路径只支持文本
 输入，不支持多模态字段。
 
 ### `env.sh`
@@ -230,7 +232,8 @@ python3 -m examples.on_policy_distillation.sdpo.prepare_data \
 ```
 
 测试 split 可以用同样的命令生成，只需将输入和 `--source-split` 改为 `test`。当前训练
-launcher 默认只读取 `train.jsonl`，不会自动执行 test eval。
+launcher 默认每 5 个训练迭代使用 `<dataset>/eval.jsonl` 做一次周期性评测
+（`--eval-prompt-data`）。
 
 如果只有 train 源数据、没有独立的 test 集，可以在生成时按比例留出 eval 集：
 `--eval-ratio` 会把该比例的规范化行写到 `<output>.parent/eval.jsonl`，其余写
@@ -295,7 +298,7 @@ $SDPO_DATA_ROOT/
 例如：
 
 ```bash
-bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-2xgpu-colocate.sh
+bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-4xgpu-colocate.sh
 ```
 
 ### 使用自定义数据路径
@@ -305,22 +308,22 @@ launcher 会优先读取 `DATA_PATH` 环境变量，未设置时才回退到 `SD
 
 ```bash
 DATA_PATH=/path/to/my/train.jsonl \
-bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-2xgpu-colocate.sh
+bash examples/on_policy_distillation/sdpo/run-sciknoweval-chemistry-4xgpu-colocate.sh
 ```
 
 ToolAlpaca 和 ToolUse 的启动方式相同，只需替换 launcher：
 
 ```bash
 DATA_PATH=<data-root>/SDPO/toolalpaca/train.jsonl \
-bash examples/on_policy_distillation/sdpo/run-toolalpaca-2xgpu-colocate.sh
+bash examples/on_policy_distillation/sdpo/run-toolalpaca-4xgpu-colocate.sh
 
 DATA_PATH=<data-root>/SDPO/tooluse/train.jsonl \
-bash examples/on_policy_distillation/sdpo/run-tooluse-2xgpu-colocate.sh
+bash examples/on_policy_distillation/sdpo/run-tooluse-4xgpu-colocate.sh
 ```
 
 训练开始前，Relax 会启动 managed SGLang teacher，并在 actor、rollout 和 teacher 之间按
-colocate/offload 配置切换 GPU。脚本设置了 `--skip-eval-before-train`，所以启动后直接
-进入训练，不会先读取 test 数据做 eval。
+colocate 配置切换 GPU。launcher 默认每 5 个训练迭代在 `<dataset>/eval.jsonl` 上评测一次，
+并在第一个训练迭代前先跑一次 eval 作为基线。
 
 ## Reward 与 Feedback
 
@@ -380,9 +383,10 @@ ToolAlpaca 输入必须包含 `golden_answer`；ToolUse 输入必须包含参考
 
 ### teacher 请求超时或显存不足
 
-检查 teacher/rollout 是否确实各分配一张 GPU，并确认 `--colocate --offload` 没有被删除。
-Biology launcher 的默认 rollout 规模明显大于其他脚本；首次验证建议使用其他 launcher
-或先生成小规模 smoke 数据再训练：
+检查 teacher/rollout 是否确实各分配一张 GPU，并确认 `--colocate`
+和 `--teacher-sglang-enable-weights-cpu-backup` 没有被删除。
+所有 launcher 的默认 rollout 规模较大（5000 prompts / global-batch 256）；首次验证建议
+先生成小规模 smoke 数据再训练：
 
 ```bash
 python3 -m examples.on_policy_distillation.sdpo.prepare_data \

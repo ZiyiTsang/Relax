@@ -10,7 +10,6 @@ export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
 export RELAX_OPD_PER_POS_TOKEN_IDS=1
 
-
 student_model="${STUDENT_MODEL_PATH:?Set STUDENT_MODEL_PATH}"
 teacher_model="${TEACHER_MODEL_PATH:-${student_model}}"
 data_path="${DATA_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/biology/train.jsonl}"
@@ -56,6 +55,7 @@ OPD_ARGS=(
     --teacher-hf-checkpoint "${teacher_model}"
     --teacher-num-gpus-per-engine 1
     --teacher-sglang-mem-fraction-static 0.5
+    --teacher-sglang-enable-weights-cpu-backup
     --opd-loss-coef 1.0
     --opd-kl-coef 0.0
     --opd-disable-rl-reward

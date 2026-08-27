@@ -104,7 +104,6 @@ def _normalize_sciknoweval_row(
         "domain": normalized_domain,
         "task_type": str(row.get("type", "unknown")),
         "answer_key": answer,
-        "choices": choices,
     }
     return {"prompt": prompt, "label": _json_text(answer), "metadata": metadata}
 

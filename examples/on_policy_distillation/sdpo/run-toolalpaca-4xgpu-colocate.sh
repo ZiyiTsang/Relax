@@ -4,15 +4,16 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 source scripts/models/qwen3-8B.sh
+source examples/on_policy_distillation/sdpo/env.sh
 
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 
 export RELAX_OPD_PER_POS_TOKEN_IDS=1
 
-
 student_model="${STUDENT_MODEL_PATH:?Set STUDENT_MODEL_PATH}"
 teacher_model="${TEACHER_MODEL_PATH:-${student_model}}"
 data_path="${DATA_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/toolalpaca/train.jsonl}"
+eval_path="${EVAL_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/toolalpaca/eval.jsonl}"
 now="$(date '+%Y-%m-%d-%H:%M:%S')"
 experiment_name="${EXPERIMENT_NAME:-sdpo-toolalpaca-${now}}"
 
@@ -31,10 +32,10 @@ ROLLOUT_ARGS=(
     --group-rm
     --custom-rm-path examples.on_policy_distillation.sdpo.reward.score
     --reward-key score
-    --num-rollout 100
-    --rollout-batch-size 8
+    --num-rollout 5000
+    --rollout-batch-size 32
     --n-samples-per-prompt 8
-    --global-batch-size 32
+    --global-batch-size 256
     --rollout-max-prompt-len 2048
     --rollout-max-response-len 8192
     --rollout-temperature 1.0
@@ -42,7 +43,9 @@ ROLLOUT_ARGS=(
 )
 
 EVAL_ARGS=(
-    --skip-eval-before-train
+    --eval-interval 5
+    --eval-prompt-data toolalpaca "${eval_path}"
+    --n-samples-per-eval-prompt 16
 )
 
 OPD_ARGS=(
@@ -52,6 +55,7 @@ OPD_ARGS=(
     --teacher-hf-checkpoint "${teacher_model}"
     --teacher-num-gpus-per-engine 1
     --teacher-sglang-mem-fraction-static 0.5
+    --teacher-sglang-enable-weights-cpu-backup
     --opd-loss-coef 1.0
     --opd-kl-coef 0.0
     --opd-disable-rl-reward
