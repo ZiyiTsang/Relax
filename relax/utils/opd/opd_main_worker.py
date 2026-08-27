@@ -131,7 +131,6 @@ class TopkWorker:
     TRANSFER_STUDENT_LOG_PROBS = "opd_topk_student_log_probs"
     # only union
     TRANSFER_K_LENGTHS = "opd_topk_ksz"
-    TRANSFER_FIELDS = (TRANSFER_TOKEN_IDS, TRANSFER_STUDENT_LOG_PROBS, TRANSFER_TEACHER_LOG_PROBS)
 
     def __init__(
         self,
