@@ -15,7 +15,9 @@ teacher_model="${TEACHER_MODEL_PATH:-${student_model}}"
 data_path="${DATA_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/biology/train.jsonl}"
 eval_path="${EVAL_PATH:-${SDPO_DATA_ROOT:?Set SDPO_DATA_ROOT}/sciknoweval/biology/eval.jsonl}"
 now="$(date '+%Y-%m-%d-%H:%M:%S')"
-experiment_name="${EXPERIMENT_NAME:-sdpo-sciknoweval-biology-${now}}"
+# Teacher mode: ema (below) | static
+experiment_name="${EXPERIMENT_NAME:-sdpo-ema-sciknoweval-biology-${now}}"
+#experiment_name="${EXPERIMENT_NAME:-sdpo-sciknoweval-biology-${now}}"
 
 CKPT_ARGS=(
     --hf-checkpoint "${student_model}"
@@ -66,6 +68,9 @@ OPD_ARGS=(
     --opd-norm-mode tail
     --opd-teacher-timeout-s 600
     --use-rollout-logprobs
+    # ema mode (delete the two flags below for static mode)
+    --sdpo-teacher-update-mode ema
+    --sdpo-teacher-ema-alpha 0.01
 )
 
 GRPO_ARGS=(
@@ -120,7 +125,8 @@ MISC_ARGS=(
 WANDB_ARGS=(
     --use-wandb
     --wandb-project relax-sdpo
-    --wandb-group "${WANDB_RUN_GROUP:-sdpo-sciknoweval-biology}"
+    --wandb-group "${WANDB_RUN_GROUP:-sdpo-ema-sciknoweval-biology}"
+    # static: --wandb-group "${WANDB_RUN_GROUP:-sdpo-sciknoweval-biology}"
     --wandb-key "${WANDB_API_KEY}"
 )
 
