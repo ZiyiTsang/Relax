@@ -971,26 +971,6 @@ async def _encode_images_b64(raw_images: list, cache_key: str, mm_dict: dict | N
     return cached
 
 
-async def build_teacher_preexpanded_image_data(sample: "Sample") -> list | None:
-    """Build image_data for the teacher forward request (OPSD path).
-
-    Ships raw base64 images + teacher image_grid_thw via
-    format=opd_preexpanded_raw. Returns None when there are no images (text-
-    only path).
-    """
-    image_b64_list = getattr(sample, "teacher_image_b64_list", None)
-    image_grid_thw = getattr(sample, "teacher_image_grid_thw", None)
-    if not image_b64_list or image_grid_thw is None:
-        return None
-    return [
-        {
-            "format": PREEXPANDED_RAW_FORMAT,
-            "images_b64": list(image_b64_list),
-            "image_grid_thw": _to_jsonable(image_grid_thw),
-        }
-    ]
-
-
 async def build_student_preexpanded_image_data(sample: "Sample") -> list | None:
     """Build image_data for the student extra forward request (student-at-
     teacher-topk).
