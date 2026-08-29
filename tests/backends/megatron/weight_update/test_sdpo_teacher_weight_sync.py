@@ -123,6 +123,7 @@ def _make_updater(monkeypatch, event, *, send_error=None, versions=None):
 
 
 def test_sdpo_teacher_publish_pauses_flushes_transfers_and_resumes(monkeypatch):
+    pytest.importorskip("megatron.core")
     event = []
     versions = []
     updater = _make_updater(monkeypatch, event, versions=versions)
@@ -138,6 +139,7 @@ def test_sdpo_teacher_publish_pauses_flushes_transfers_and_resumes(monkeypatch):
 
 
 def test_sdpo_teacher_publish_failure_does_not_resume_serving(monkeypatch):
+    pytest.importorskip("megatron.core")
     event = []
     versions = []
     updater = _make_updater(monkeypatch, event, send_error=RuntimeError("chunk failed"), versions=versions)
@@ -153,6 +155,7 @@ def test_sdpo_teacher_publish_failure_does_not_resume_serving(monkeypatch):
 
 
 def test_sdpo_teacher_publish_retry_starts_from_uncommitted_version(monkeypatch):
+    pytest.importorskip("megatron.core")
     event = []
     failed_updater = _make_updater(monkeypatch, event, send_error=RuntimeError("chunk failed"))
 
@@ -170,6 +173,7 @@ def test_sdpo_teacher_publish_retry_starts_from_uncommitted_version(monkeypatch)
 
 
 def test_weight_update_coordinates_nonzero_sender_failure(tmp_path):
+    pytest.importorskip("megatron.core")
     import torch.multiprocessing as mp
 
     mp.spawn(
@@ -181,6 +185,7 @@ def test_weight_update_coordinates_nonzero_sender_failure(tmp_path):
 
 
 def test_torch_memory_saver_uses_cpu_weight_serialization(monkeypatch):
+    pytest.importorskip("megatron.core")
     import torch
 
     from relax.backends.megatron.weight_update import update_weight_from_tensor as module
