@@ -46,7 +46,7 @@ class MetricsServiceAdapter:
             logger.warning(f"MetricsServiceAdapter: Error - step value must be int, got {type(step)}")
             return False
 
-        metrics_to_send = {k: v for k, v in metrics.items() if k != step_key}
+        metrics_to_send = dict(metrics)
 
         # Add timeline events to metrics if enabled
         if self._timeline_enabled:

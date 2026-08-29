@@ -6,11 +6,11 @@ from argparse import Namespace
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Union
 
-import wandb
 from fastapi import FastAPI
 from pydantic import BaseModel
 from ray import serve
 
+import wandb
 from relax.utils.env import Envs
 from relax.utils.logging_utils import get_logger
 from relax.utils.metrics.adapters.apprise import _AppriseAdapter
@@ -175,9 +175,17 @@ class MetricsService:
 
         init_kwargs = {
             "project": project,
-            "name": run_name,
             "entity": getattr(config, "wandb_team", None),
         }
+        wandb_run_id = getattr(config, "wandb_run_id", None)
+        if wandb_run_id:
+            init_kwargs["id"] = wandb_run_id
+            init_kwargs["resume"] = "allow"
+            init_kwargs["settings"] = wandb.Settings(mode="shared", x_primary=False, x_update_finish_state=False)
+        else:
+            init_kwargs["name"] = run_name
+        if getattr(config, "wandb_group", None):
+            init_kwargs["group"] = config.wandb_group
 
         if offline:
             init_kwargs["settings"] = wandb.Settings(mode="offline")
