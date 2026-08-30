@@ -99,7 +99,7 @@ def _opd_args() -> SimpleNamespace:
         opd_loss_coef=0.0,
         calculate_per_token_loss=True,
         opd_feedback_class="relax.utils.opd.feedback.OPDFeedback",
-        opd_teacher_prompt_key=None,
+        opd_feedback_kwargs=None,
         opd_teacher_image_key=None,
         opd_teacher_video_key=None,
         opd_teacher_audio_key=None,

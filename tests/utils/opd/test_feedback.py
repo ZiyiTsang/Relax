@@ -24,7 +24,7 @@ def _sample(group: int | None, index: int, response: str, reward: object, **meta
     )
 
 
-_SDPO_FEEDBACK_CLASSES = ["SciKnowEvalSDPOFeedback", "ToolUseSDPOFeedback"]
+_SDPO_FEEDBACK_CLASSES = ["GoldenAnswerSDPOFeedback"]
 
 
 def _sdpo_feedback_class(name: str) -> type:
@@ -51,15 +51,15 @@ def test_record_appends_text_only_to_originating_sample() -> None:
 def test_record_sample_feedback_defaults_to_env_feedback_recording() -> None:
     from relax.utils.opd.feedback import OPDFeedback
     from relax.utils.opd.opsd.feedback import OPSDFeedback
-    from relax.utils.opd.sdpo.feedback import ToolUseSDPOFeedback
+    from relax.utils.opd.sdpo.feedback import GoldenAnswerSDPOFeedback
 
     opd_sample = _sample(1, 0, "answer", {"score": 0.0, "feedback": "opd said no"})
     opsd_sample = _sample(1, 1, "answer", {"score": 0.0, "feedback": "opsd said no"})
     sdpo_sample = _sample(1, 2, "answer", {"score": 0.0, "feedback": "fix the second step"})
 
     OPDFeedback().record_sample_feedback(opd_sample, opd_sample.reward)
-    OPSDFeedback().record_sample_feedback(opsd_sample, opsd_sample.reward)
-    ToolUseSDPOFeedback().record_sample_feedback(sdpo_sample, sdpo_sample.reward)
+    OPSDFeedback(teacher_prompt_key="teacher_prompt").record_sample_feedback(opsd_sample, opsd_sample.reward)
+    GoldenAnswerSDPOFeedback().record_sample_feedback(sdpo_sample, sdpo_sample.reward)
 
     assert opd_sample.metadata["env_feedback"] == ["opd said no"]
     assert opsd_sample.metadata["env_feedback"] == ["opsd said no"]
@@ -111,17 +111,17 @@ def test_sdpo_prefers_peer_solution_and_falls_back_to_self_success(feedback_clas
 
 
 def test_sdpo_falls_back_to_original_prompt_without_solution_or_feedback() -> None:
-    from relax.utils.opd.sdpo.feedback import ToolUseSDPOFeedback
+    from relax.utils.opd.sdpo.feedback import GoldenAnswerSDPOFeedback
 
     sample = _sample(3, 0, "an answer", {"score": 0.0})
-    ToolUseSDPOFeedback().prepare_teacher_prompts([sample], [sample.reward])
+    GoldenAnswerSDPOFeedback().prepare_teacher_prompts([sample], [sample.reward])
 
     assert sample.teacher_prompt == sample.prompt
     assert sample.opd_sample_mask is False
 
 
 def test_sdpo_fallback_copies_original_message_prompt() -> None:
-    from relax.utils.opd.sdpo.feedback import ToolUseSDPOFeedback
+    from relax.utils.opd.sdpo.feedback import GoldenAnswerSDPOFeedback
 
     prompt = [{"role": "user", "content": "question"}]
     sample = Sample(
@@ -132,7 +132,7 @@ def test_sdpo_fallback_copies_original_message_prompt() -> None:
         reward={"score": 0.0},
     )
 
-    ToolUseSDPOFeedback().prepare_teacher_prompts([sample], [sample.reward])
+    GoldenAnswerSDPOFeedback().prepare_teacher_prompts([sample], [sample.reward])
 
     assert sample.teacher_prompt == prompt
     assert sample.teacher_prompt is not prompt
@@ -179,7 +179,7 @@ def test_sdpo_uses_same_group_successful_rollout(feedback_class_name: str) -> No
     assert failed.opd_sample_mask is True
 
 
-@pytest.mark.parametrize("feedback_class_name", ["ToolUseSDPOFeedback"])
+@pytest.mark.parametrize("feedback_class_name", ["GoldenAnswerSDPOFeedback"])
 def test_tool_use_uid_when_group_index_is_missing(feedback_class_name: str) -> None:
     failed = _sample(None, 0, "failed attempt", {"score": 0.0}, uid="uid-a")
     solved = _sample(None, 1, "same uid solution", {"score": 1.0}, uid="uid-a")
@@ -194,6 +194,21 @@ def test_tool_use_uid_when_group_index_is_missing(feedback_class_name: str) -> N
     assert failed.opd_sample_mask is True
 
 
+def test_sdpo_success_reward_threshold_configures_success_boundary() -> None:
+    from relax.utils.opd.sdpo.feedback import GoldenAnswerSDPOFeedback
+
+    low = _sample(5, 0, "partial solution", {"score": 0.9})
+    strict = GoldenAnswerSDPOFeedback(success_reward_threshold=1.0)
+    strict.prepare_teacher_prompts([low], [low.reward])
+    assert low.teacher_prompt == low.prompt
+    assert low.opd_sample_mask is False
+
+    lenient = GoldenAnswerSDPOFeedback(success_reward_threshold=0.8)
+    lenient.prepare_teacher_prompts([low], [low.reward])
+    assert "partial solution" in str(low.teacher_prompt)
+    assert low.opd_sample_mask is True
+
+
 def test_opsd_assigns_dataset_privilege_while_opd_stays_empty() -> None:
     from relax.utils.opd.feedback import OPDFeedback
     from relax.utils.opd.opsd.feedback import OPSDFeedback
@@ -204,7 +219,9 @@ def test_opsd_assigns_dataset_privilege_while_opd_stays_empty() -> None:
     unprivileged = _sample(6, 2, "answer", 1.0)
 
     OPDFeedback().prepare_teacher_prompts([opd_sample], [opd_sample.reward])
-    OPSDFeedback().prepare_teacher_prompts([privileged, unprivileged], [privileged.reward, unprivileged.reward])
+    OPSDFeedback(teacher_prompt_key="teacher_prompt").prepare_teacher_prompts(
+        [privileged, unprivileged], [privileged.reward, unprivileged.reward]
+    )
 
     assert opd_sample.teacher_prompt is None
     assert opd_sample.opd_sample_mask is None
@@ -214,7 +231,7 @@ def test_opsd_assigns_dataset_privilege_while_opd_stays_empty() -> None:
     assert unprivileged.opd_sample_mask is None
 
 
-@pytest.mark.parametrize("feedback_class_name", ["ToolUseSDPOFeedback"])
+@pytest.mark.parametrize("feedback_class_name", ["GoldenAnswerSDPOFeedback"])
 def test_tool_use_feedback_share_peer_solutions(feedback_class_name: str) -> None:
     failed = _sample(11, 0, "failed attempt", {"score": 0.0, "feedback": "fix the tool call"})
     solved = _sample(11, 1, "successful attempt", {"score": 1.0})
@@ -248,6 +265,45 @@ def test_load_feedback_class_rejects_non_feedback_path() -> None:
         load_feedback_class("not-a-dotted-path")
 
 
+def test_load_feedback_defaults_to_opd_with_empty_kwargs() -> None:
+    from relax.utils.opd.feedback import OPDFeedback, load_feedback
+
+    feedback = load_feedback(None, None)
+    assert isinstance(feedback, OPDFeedback)
+    assert feedback.teacher_prompt_key is None
+    assert feedback.success_reward_threshold == 1.0
+
+
+def test_load_feedback_binds_kwargs_to_selected_class() -> None:
+    from relax.utils.opd.feedback import load_feedback
+    from relax.utils.opd.opsd.feedback import OPSDFeedback
+    from relax.utils.opd.sdpo.feedback import SDPOFeedback
+
+    sdpo = load_feedback(
+        "relax.utils.opd.sdpo.feedback.SDPOFeedback",
+        {"success_reward_threshold": 0.8},
+    )
+    assert isinstance(sdpo, SDPOFeedback)
+    assert sdpo.success_reward_threshold == 0.8
+
+    opsd = load_feedback(
+        "relax.utils.opd.opsd.feedback.OPSDFeedback",
+        {"teacher_prompt_key": "teacher_prompt"},
+    )
+    assert isinstance(opsd, OPSDFeedback)
+    assert opsd.teacher_prompt_key == "teacher_prompt"
+
+
+def test_load_feedback_rejects_unknown_kwargs_and_missing_opsd_key() -> None:
+    from relax.utils.opd.feedback import load_feedback
+
+    with pytest.raises(TypeError, match="Invalid --opd-feedback-kwargs for SDPOFeedback"):
+        load_feedback("relax.utils.opd.sdpo.feedback.SDPOFeedback", {"unknown_param": 1})
+
+    with pytest.raises(ValueError, match="requires"):
+        load_feedback("relax.utils.opd.opsd.feedback.OPSDFeedback", {})
+
+
 def test_code_sdpo_feedback_is_a_placeholder() -> None:
     from relax.utils.opd.sdpo.feedback import CodeSDPOFeedback
 
@@ -272,10 +328,10 @@ def test_opd_feedback_hooks_are_no_ops() -> None:
 def test_opd_create_opsd_worker_follows_dataset_keys() -> None:
     from relax.utils.opd.feedback import OPDFeedback
 
-    args = SimpleNamespace(opd_teacher_prompt_key=None, opd_teacher_image_key=None)
+    args = SimpleNamespace(opd_teacher_image_key=None)
     assert OPDFeedback.create_opsd_worker(args).is_opsd is False
 
-    args.opd_teacher_prompt_key = "teacher_prompt"
+    args.opd_teacher_image_key = "images"
     assert OPDFeedback.create_opsd_worker(args).is_opsd is True
 
 
@@ -295,8 +351,7 @@ def test_sdpo_extra_transfer_schema_and_mask_column() -> None:
 def test_sdpo_create_opsd_worker_is_always_active() -> None:
     from relax.utils.opd.sdpo.feedback import SDPOFeedback
 
-    args = SimpleNamespace(opd_teacher_prompt_key=None, opd_teacher_image_key=None)
-    assert SDPOFeedback.create_opsd_worker(args).is_opsd is True
+    assert SDPOFeedback.create_opsd_worker(SimpleNamespace()).is_opsd is True
 
 
 def _sdpo_launch_args(**overrides: object) -> SimpleNamespace:

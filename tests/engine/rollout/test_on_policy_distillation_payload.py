@@ -240,8 +240,8 @@ def test_sdpo_manager_constructs_opsd_worker_and_feedback() -> None:
             "opd_log_prob_top_k": 2,
             "opd_kl_coef": 0.0,
             "opd_loss_coef": 1.0,
-            "opd_feedback_class": "relax.utils.opd.sdpo.feedback.SciKnowEvalSDPOFeedback",
-            "opd_teacher_prompt_key": None,
+            "opd_feedback_class": "relax.utils.opd.sdpo.feedback.GoldenAnswerSDPOFeedback",
+            "opd_feedback_kwargs": None,
             "opd_teacher_image_key": None,
         },
     )()
@@ -314,12 +314,12 @@ def test_teacher_transfer_schema_matrix(mode, selection, kl_coef, loss_coef, exp
         use_opd=True,
         opd_type="sglang",
         group_rm=mode == "sdpo",
-        opd_feedback_class="relax.utils.opd.sdpo.feedback.SciKnowEvalSDPOFeedback" if mode == "sdpo" else None,
+        opd_feedback_class="relax.utils.opd.sdpo.feedback.GoldenAnswerSDPOFeedback" if mode == "sdpo" else None,
+        opd_feedback_kwargs={"teacher_prompt_key": "teacher_prompt"} if mode == "opsd" else None,
         opd_token_selection=selection,
         opd_log_prob_top_k=2,
         opd_kl_coef=kl_coef,
         opd_loss_coef=loss_coef,
-        opd_teacher_prompt_key="teacher_prompt" if mode == "opsd" else None,
         opd_teacher_image_key=None,
     )
 

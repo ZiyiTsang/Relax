@@ -636,12 +636,6 @@ def add_opd_arguments(parser: Any) -> Any:
         help=("Which token set the OPD KL signal is computed on."),
     )
     parser.add_argument(
-        "--opd-teacher-prompt-key",
-        type=str,
-        default=None,
-        help=("Dataset field name that holds the teacher-side prompt for On-Policy Self-Distillation (OPSD). "),
-    )
-    parser.add_argument(
         "--opd-feedback-class",
         type=str,
         default=None,
@@ -649,6 +643,16 @@ def add_opd_arguments(parser: Any) -> Any:
             "Fully qualified EnvironmentFeedback class binding an OPD-flavored algorithm "
             "(OPSD / SDPO) to the shared rollout path. Defaults to "
             "relax.utils.opd.feedback.OPDFeedback."
+        ),
+    )
+    parser.add_argument(
+        "--opd-feedback-kwargs",
+        type=json.loads,
+        default=None,
+        help=(
+            "JSON string of constructor parameters for --opd-feedback-class, e.g. "
+            '\'{"teacher_prompt_key": "teacher_prompt"}\' for OPSDFeedback or '
+            "'{\"success_reward_threshold\": 0.8}' for SDPOFeedback."
         ),
     )
     parser.add_argument(
@@ -703,9 +707,12 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
     if not getattr(args, "use_opd", False):
         return
 
-    from relax.utils.opd.feedback import load_feedback_class
+    from relax.utils.opd.feedback import load_feedback
 
-    load_feedback_class(getattr(args, "opd_feedback_class", None)).validate_launch_args(args)
+    load_feedback(
+        getattr(args, "opd_feedback_class", None),
+        getattr(args, "opd_feedback_kwargs", None),
+    ).validate_launch_args(args)
 
     # OPD is enabled here. Backfill the routing key so teacher routing AND the
     # per-source metrics (compute_mopd_metrics) get a consistent value even when
@@ -756,14 +763,6 @@ def validate_opd_args(args: Namespace, *, is_sft: bool, log: Any = logger) -> No
             "Use --opd-kl-coef=X --opd-loss-coef=0.0 for advantage mode, or "
             "--opd-kl-coef=0.0 --opd-loss-coef=X for loss mode."
         )
-
-    if getattr(args, "opd_teacher_prompt_key", None) is not None:
-        if args.opd_type != "sglang":
-            raise ValueError(
-                "--opd-teacher-prompt-key currently only supports --opd-type=sglang "
-                f"(got --opd-type={args.opd_type}). The megatron teacher path does not "
-                "yet rebuild a teacher-side data_iterator from teacher_tokens."
-            )
 
     if getattr(args, "opd_teacher_image_key", None) is not None:
         if args.opd_type != "sglang":
