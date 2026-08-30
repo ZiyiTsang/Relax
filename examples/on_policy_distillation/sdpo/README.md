@@ -123,8 +123,8 @@ prompt-data
 `--n-samples-per-prompt 8`、`--global-batch-size 256`、`--eval-interval 5`、
 `--n-samples-per-eval-prompt 16`。
 
-| 脚本                                                                                         | 数据入口                            | eval 入口                          | Feedback 类                 |
-| -------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------- | --------------------------- |
+| 脚本                                                                                         | 数据入口                            | eval 入口                          | Feedback 类                |
+| -------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------- | -------------------------- |
 | [`run-sciknoweval-biology-4xgpu-colocate.sh`](run-sciknoweval-biology-4xgpu-colocate.sh)     | `sciknoweval/biology/train.jsonl`   | `sciknoweval/biology/eval.jsonl`   | `GoldenAnswerSDPOFeedback` |
 | [`run-sciknoweval-chemistry-4xgpu-colocate.sh`](run-sciknoweval-chemistry-4xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `sciknoweval/chemistry/eval.jsonl` | `GoldenAnswerSDPOFeedback` |
 | [`run-sciknoweval-physics-4xgpu-colocate.sh`](run-sciknoweval-physics-4xgpu-colocate.sh)     | `sciknoweval/physics/train.jsonl`   | `sciknoweval/physics/eval.jsonl`   | `GoldenAnswerSDPOFeedback` |

@@ -196,7 +196,8 @@ class SDPOFeedback(EnvironmentFeedback):
 
 
 class GoldenAnswerSDPOFeedback(SDPOFeedback):
-    """Static text datasets scored against a golden answer (MCQ, tool calls)."""
+    """Static text datasets scored against a golden answer (MCQ, tool
+    calls)."""
 
 
 class CodeSDPOFeedback(SDPOFeedback):
