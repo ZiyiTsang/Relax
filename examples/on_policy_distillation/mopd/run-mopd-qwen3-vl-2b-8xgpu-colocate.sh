@@ -88,7 +88,6 @@ TEACHER_ROUTES="{\"openai/gsm8k\":\"${MODEL_DIR}/${TEXT_TEACHER_MODEL_NAME}/\",\
 
 OPD_ARGS=(
    --use-opd
-   --opd-feedback-class relax.utils.opd.opsd.feedback.OPSDFeedback
    --opd-type sglang
    --opd-kl-coef 0.3
    --opd-teacher-key data_source
@@ -165,6 +164,7 @@ SGLANG_ARGS=(
    --sglang-mem-fraction-static 0.8
    --sglang-load-format dummy
    --sglang-enable-weights-cpu-backup
+   --sglang-disable-cuda-graph
 )
 
 RESOURCE_JSON="{\"actor\": [1, ${ACTOR_GPUS}], \"rollout\": [1, ${ROLLOUT_GPUS}], \"teacher\": [1, ${TEACHER_GPUS}]}"

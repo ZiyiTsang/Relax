@@ -8,6 +8,10 @@
 teacher sees -- bound dynamically to a subclass. The base-class defaults
 reproduce plain OPD (empty privilege), so a subclass only overrides the hooks
 where its behavior differs. Hooks raise to hard-fail and return to degrade.
+
+The constructor parameter schema is declared once on the interface; ``args``
+carries it verbatim via ``--opd-feedback-kwargs`` and the selected subclass
+binds it at construction time, consuming only the fields it uses.
 """
 
 from __future__ import annotations
@@ -20,6 +24,10 @@ from relax.utils.types import Sample
 
 
 class EnvironmentFeedback:
+    def __init__(self, teacher_prompt_key: str | None = None, success_reward_threshold: float = 1.0) -> None:
+        self.teacher_prompt_key = teacher_prompt_key
+        self.success_reward_threshold = success_reward_threshold
+
     @staticmethod
     def record(sample: Sample, text: str | None) -> None:
         if text:
@@ -93,8 +101,17 @@ def load_feedback_class(path: str | None) -> type[EnvironmentFeedback]:
     return cls
 
 
+def load_feedback(path: str | None, kwargs: dict[str, Any] | None) -> EnvironmentFeedback:
+    cls = load_feedback_class(path)
+    try:
+        return cls(**(kwargs or {}))
+    except TypeError as e:
+        raise TypeError(f"Invalid --opd-feedback-kwargs for {cls.__name__}: {kwargs or {}} ({e})") from e
+
+
 __all__ = [
     "EnvironmentFeedback",
     "OPDFeedback",
+    "load_feedback",
     "load_feedback_class",
 ]

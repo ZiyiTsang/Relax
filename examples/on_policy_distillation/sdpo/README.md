@@ -123,14 +123,14 @@ prompt-data
 `--n-samples-per-prompt 8`、`--global-batch-size 256`、`--eval-interval 5`、
 `--n-samples-per-eval-prompt 16`。
 
-| 脚本                                                                                         | 数据入口                            | eval 入口                          | Feedback 类               |
-| -------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------- | ------------------------- |
-| [`run-sciknoweval-biology-4xgpu-colocate.sh`](run-sciknoweval-biology-4xgpu-colocate.sh)     | `sciknoweval/biology/train.jsonl`   | `sciknoweval/biology/eval.jsonl`   | `SciKnowEvalSDPOFeedback` |
-| [`run-sciknoweval-chemistry-4xgpu-colocate.sh`](run-sciknoweval-chemistry-4xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `sciknoweval/chemistry/eval.jsonl` | `SciKnowEvalSDPOFeedback` |
-| [`run-sciknoweval-physics-4xgpu-colocate.sh`](run-sciknoweval-physics-4xgpu-colocate.sh)     | `sciknoweval/physics/train.jsonl`   | `sciknoweval/physics/eval.jsonl`   | `SciKnowEvalSDPOFeedback` |
-| [`run-sciknoweval-material-4xgpu-colocate.sh`](run-sciknoweval-material-4xgpu-colocate.sh)   | `sciknoweval/material/train.jsonl`  | `sciknoweval/material/eval.jsonl`  | `SciKnowEvalSDPOFeedback` |
-| [`run-tooluse-4xgpu-colocate.sh`](run-tooluse-4xgpu-colocate.sh)                             | `tooluse/train.jsonl`               | `tooluse/eval.jsonl`               | `ToolUseSDPOFeedback`     |
-| [`run-toolalpaca-4xgpu-colocate.sh`](run-toolalpaca-4xgpu-colocate.sh)                       | `toolalpaca/train.jsonl`            | `toolalpaca/eval.jsonl`            | `ToolUseSDPOFeedback`     |
+| 脚本                                                                                         | 数据入口                            | eval 入口                          | Feedback 类                 |
+| -------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------- | --------------------------- |
+| [`run-sciknoweval-biology-4xgpu-colocate.sh`](run-sciknoweval-biology-4xgpu-colocate.sh)     | `sciknoweval/biology/train.jsonl`   | `sciknoweval/biology/eval.jsonl`   | `GoldenAnswerSDPOFeedback` |
+| [`run-sciknoweval-chemistry-4xgpu-colocate.sh`](run-sciknoweval-chemistry-4xgpu-colocate.sh) | `sciknoweval/chemistry/train.jsonl` | `sciknoweval/chemistry/eval.jsonl` | `GoldenAnswerSDPOFeedback` |
+| [`run-sciknoweval-physics-4xgpu-colocate.sh`](run-sciknoweval-physics-4xgpu-colocate.sh)     | `sciknoweval/physics/train.jsonl`   | `sciknoweval/physics/eval.jsonl`   | `GoldenAnswerSDPOFeedback` |
+| [`run-sciknoweval-material-4xgpu-colocate.sh`](run-sciknoweval-material-4xgpu-colocate.sh)   | `sciknoweval/material/train.jsonl`  | `sciknoweval/material/eval.jsonl`  | `GoldenAnswerSDPOFeedback` |
+| [`run-tooluse-4xgpu-colocate.sh`](run-tooluse-4xgpu-colocate.sh)                             | `tooluse/train.jsonl`               | `tooluse/eval.jsonl`               | `GoldenAnswerSDPOFeedback` |
+| [`run-toolalpaca-4xgpu-colocate.sh`](run-toolalpaca-4xgpu-colocate.sh)                       | `toolalpaca/train.jsonl`            | `toolalpaca/eval.jsonl`            | `GoldenAnswerSDPOFeedback` |
 
 当前脚本没有独立的公共 SDPO launcher，每个数据入口都显式指定了自己的 feedback 类。
 student rollout 统一为 `--rollout-max-response-len 8192`；teacher 请求超时由各 launcher 的
@@ -333,10 +333,11 @@ colocate 配置切换 GPU。launcher 默认每 5 个训练迭代在 `<dataset>/e
 标签即视为格式错误（score=0，即使回答里出现了正确选项）。普通选择题会和
 `metadata.answer_key` 比较，true/false 任务会进行归一化比较。
 
-三种 `SDPOFeedback`（`SciKnowEvalSDPOFeedback`、`ToolUseSDPOFeedback`、
-`CodeSDPOFeedback`）按同一套决策矩阵决定是否进蒸馏、注入什么（按优先级）：
+三类数据（SciKnowEval、ToolUse/ToolAlpaca、Code）按同一套决策矩阵决定是否进蒸馏、
+注入什么（按优先级）；前两者共用 `GoldenAnswerSDPOFeedback`（静态 golden-answer 文本
+任务），Code 预留 `CodeSDPOFeedback` 占位（reward 未接入，调用即报错）：
 
-1. 自身成功（`score >= 1`）→ 注入同 `group_index`/`metadata.uid` 内成功 peer 的正确解，
+1. 自身成功（`score >= success_reward_threshold`，默认 1.0，可经 `--opd-feedback-kwargs` 调整）→ 注入同 `group_index`/`metadata.uid` 内成功 peer 的正确解，
    无 peer 时用自己的解，进蒸馏；
 2. 失败但有成功 peer → 只注入 peer 的正确解（丢弃当前样本的 feedback），进蒸馏；
 3. 失败、无 peer、且是格式/截断错误 → 注入格式/截断反馈文字，进蒸馏；

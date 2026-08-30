@@ -70,10 +70,10 @@ def _set_sdpo_teacher_prompt(sample: Sample, additions: list[str]) -> None:
     sample.teacher_prompt_length = None
 
 
-def _is_successful_reward(reward: Any) -> bool:
+def _is_successful_reward(reward: Any, threshold: float) -> bool:
     value = reward.get("score", reward.get("reward")) if isinstance(reward, dict) else reward
     try:
-        return float(value) >= 1.0
+        return float(value) >= threshold
     except (TypeError, ValueError):
         return False
 
@@ -95,7 +95,7 @@ def _sdpo_group_key(sample: Sample, position: int) -> Any:
     return ("uid", uid) if uid is not None else ("singleton", position)
 
 
-def _prepare_sdpo_teacher_prompts(group: list[Sample], rewards: list[Any]) -> None:
+def _prepare_sdpo_teacher_prompts(group: list[Sample], rewards: list[Any], threshold: float) -> None:
     if len(group) != len(rewards):
         raise ValueError(f"feedback requires one reward per sample: {len(group)} != {len(rewards)}")
     by_group: dict[Any, list[Sample]] = defaultdict(list)
@@ -103,13 +103,13 @@ def _prepare_sdpo_teacher_prompts(group: list[Sample], rewards: list[Any]) -> No
         by_group[_sdpo_group_key(sample, position)].append(sample)
     reward_by_id = {id(sample): reward for sample, reward in zip(group, rewards, strict=True)}
     successful = {
-        key: [sample for sample in samples if _is_successful_reward(reward_by_id[id(sample)])]
+        key: [sample for sample in samples if _is_successful_reward(reward_by_id[id(sample)], threshold)]
         for key, samples in by_group.items()
     }
     for key, samples in by_group.items():
         for sample in samples:
             reward = reward_by_id[id(sample)]
-            is_success = _is_successful_reward(reward)
+            is_success = _is_successful_reward(reward, threshold)
             peer = next((candidate for candidate in successful[key] if candidate is not sample), None)
             additions = []
             if is_success:
@@ -130,7 +130,7 @@ class SDPOFeedback(EnvironmentFeedback):
     def prepare_teacher_prompts(self, group: list[Sample], rewards: list[Any]) -> None:
         for sample in group:
             validate_sdpo_text_only(sample)
-        _prepare_sdpo_teacher_prompts(group, rewards)
+        _prepare_sdpo_teacher_prompts(group, rewards, self.success_reward_threshold)
         for sample in group:
             _clear_teacher_payload(sample)
         for sample in group:
@@ -197,12 +197,8 @@ class SDPOFeedback(EnvironmentFeedback):
         )
 
 
-class SciKnowEvalSDPOFeedback(SDPOFeedback):
-    pass
-
-
-class ToolUseSDPOFeedback(SDPOFeedback):
-    pass
+class GoldenAnswerSDPOFeedback(SDPOFeedback):
+    """Static text datasets scored against a golden answer (MCQ, tool calls)."""
 
 
 class CodeSDPOFeedback(SDPOFeedback):
@@ -215,7 +211,6 @@ class CodeSDPOFeedback(SDPOFeedback):
 
 __all__ = [
     "SDPOFeedback",
-    "SciKnowEvalSDPOFeedback",
-    "ToolUseSDPOFeedback",
+    "GoldenAnswerSDPOFeedback",
     "CodeSDPOFeedback",
 ]

@@ -10,7 +10,7 @@ import numpy as np
 
 from relax.utils.logging_utils import get_logger
 from relax.utils.opd import opd_main_worker, opd_opsd_worker
-from relax.utils.opd.feedback import load_feedback_class
+from relax.utils.opd.feedback import load_feedback
 from relax.utils.types import Sample
 
 
@@ -97,7 +97,9 @@ def _pick_teacher_url(args, sample=None) -> str:
 class OpdManager:
     def __init__(self, args):
         self.args = args
-        self.feedback = load_feedback_class(getattr(args, "opd_feedback_class", None))()
+        self.feedback = load_feedback(
+            getattr(args, "opd_feedback_class", None), getattr(args, "opd_feedback_kwargs", None)
+        )
         self.topk_worker: opd_main_worker.TopkWorker | None = None
         self.sampled_worker: opd_main_worker.SampledTokenWorker | None = None  # 仅 student_sampled
         self.opsd_worker: opd_opsd_worker.OpsdWorker | None = None

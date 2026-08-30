@@ -84,7 +84,6 @@ class GenerateState(metaclass=SingletonMeta):
 
         # OPD manager (singleton — one OpdManager per GenerateState)
         self.opd_manager = opd.OpdManager(args) if opd.is_opd_enabled(args) else None
-        self.feedback = self.opd_manager.feedback if self.opd_manager is not None else None
 
         # Media-encoding thread pool for this rollout worker process, sized by
         # --encode-max-workers (falls back to $RELAX_ENCODE_MAX_WORKERS, then an
@@ -642,10 +641,11 @@ async def _record_feedback_and_prefill(
 ) -> None:
     """The shared OPD-family two-step: record env feedback, then build the
     privileged teacher prompts, before the teacher prefill fetch."""
+    feedback = state.opd_manager.feedback
     rewards = [sample.reward for sample in group]
     for sample, reward in zip(group, rewards):
-        state.feedback.record_sample_feedback(sample, reward)
-    state.feedback.prepare_teacher_prompts(group, rewards)
+        feedback.record_sample_feedback(sample, reward)
+    feedback.prepare_teacher_prompts(group, rewards)
     await state.opd_manager.prefill(group, encode_multimodal_inputs)
 
 
